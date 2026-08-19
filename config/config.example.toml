@@ -27,9 +27,11 @@ timeout_seconds = 15
 retries = 1
 
 [export.todoist]
-# Enabling this requires a token, from either source below; a run with neither
-# fails immediately rather than at the first API call.
-enabled = false
+# The export is on unless this says otherwise - left commented out here because
+# it needs a token, from either source below, and this file ships without one.
+# Uncomment it once the token is in place; a true with no token fails the run,
+# while the default on its own only skips the export and lets the rest carry on.
+#enabled = true
 # Prefer GCA_TODOIST_TOKEN over storing the token here. A cron run gets it from
 # the env file next to this one - /etc/garbage-collection-automation/env - which
 # run-job.sh sources before every run.

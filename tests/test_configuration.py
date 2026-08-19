@@ -22,7 +22,7 @@ def test_example_config_is_valid():
     assert config.collection.lookahead_days == 30
     assert config.collection.due_time == time(7, 0)
     assert config.collection.types == ("restafval", "papier", "gft")
-    assert config.export.todoist.enabled is False
+    assert config.export.todoist.enabled is False, "on by default, but the template has no token"
     assert config.export.todoist.project == "Home"
     assert config.logging.level == "INFO"
 
@@ -31,7 +31,9 @@ def test_defaults_apply_when_only_the_address_is_given(write_config):
     config = configuration.load(write_config(MINIMAL))
 
     assert config.collection == configuration.CollectionConfig()
-    assert config.export.todoist == configuration.TodoistExportConfig()
+    assert config.export.todoist == configuration.TodoistExportConfig(enabled=False), (
+        "on by default, but this file carries no token"
+    )
     assert config.logging == configuration.LoggingConfig()
 
 
@@ -145,8 +147,26 @@ def test_the_environment_can_supply_the_token_an_enabled_export_needs(write_conf
 
 
 def test_a_disabled_export_needs_no_token(write_config):
-    """The default config ships enabled = false and an empty token; it must load."""
-    assert configuration.load(write_config(MINIMAL)).export.todoist.token == ""
+    """A file that turns the export off says nothing about a token; it must load."""
+    path = write_config(MINIMAL + "\n[export.todoist]\nenabled = false\n")
+
+    assert configuration.load(path).export.todoist.token == ""
+
+
+def test_the_export_is_on_when_a_token_is_all_that_is_given(write_config):
+    """The default: a file that names a token and nothing else exports."""
+    path = write_config(MINIMAL + '\n[export.todoist]\ntoken = "from-file"\n')
+
+    assert configuration.load(path).export.todoist.enabled is True
+
+
+def test_the_default_on_export_steps_aside_when_there_is_no_token(write_config, caplog):
+    """Refusing the file would stop the collection too, over a target nobody set up."""
+    with caplog.at_level("INFO"):
+        config = configuration.load(write_config(MINIMAL))
+
+    assert config.export.todoist.enabled is False
+    assert "the export is skipped" in caplog.text
 
 
 def test_missing_file_raises_config_error(tmp_path):

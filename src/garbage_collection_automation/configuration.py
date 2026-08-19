@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import contextlib
 import ipaddress
+import logging
 import os
 import re
 import stat
@@ -11,6 +12,8 @@ import tomllib
 from dataclasses import dataclass, field
 from datetime import time
 from pathlib import Path
+
+log = logging.getLogger(__name__)
 
 #: Preferred place for the Todoist API token; the environment beats the file.
 TOKEN_ENV_VAR = "GCA_TODOIST_TOKEN"
@@ -70,7 +73,8 @@ class CollectionConfig:
 
 @dataclass(frozen=True)
 class TodoistExportConfig:
-    enabled: bool = False
+    #: On unless the file says otherwise; a run without a token skips it, see _todoist().
+    enabled: bool = True
     token: str = ""
     project: str = "Home"
     remind_days_before: int = 1
@@ -220,15 +224,28 @@ def _todoist(section: dict) -> TodoistExportConfig:
     if remind < 0:
         raise ConfigError(f"[{label}] remind_days_before cannot be negative, got {remind}")
 
-    enabled = _optional_bool(section, label, "enabled", False)
+    enabled = _optional_bool(section, label, "enabled", True)
     token = (os.environ.get(TOKEN_ENV_VAR) or _optional_str(section, label, "token", "")).strip()
     if enabled and not token:
-        # Every other key fails the run when it is wrong; a blank token would
-        # instead fail at the first API call, hours later and in the cron log.
-        raise ConfigError(
-            f"[{label}] enabled is true but no token was given; "
-            f"set {TOKEN_ENV_VAR} or [{label}] token"
+        if "enabled" in section:
+            # Asked for by name. Every other key fails the run when it is wrong;
+            # a blank token would instead fail at the first API call, hours later
+            # and in the cron log.
+            raise ConfigError(
+                f"[{label}] enabled is true but no token was given; "
+                f"set {TOKEN_ENV_VAR} or [{label}] token"
+            )
+        # On because that is the default, not because anyone asked. Refusing the
+        # whole file here would stop the collection too, over a target nobody has
+        # configured yet - so skip the export instead and say so once.
+        log.info(
+            "[%s] is on by default but no token was given; the export is skipped "
+            "until %s or [%s] token is set",
+            label,
+            TOKEN_ENV_VAR,
+            label,
         )
+        enabled = False
 
     return TodoistExportConfig(
         enabled=enabled,
@@ -401,8 +418,9 @@ timeout_seconds = {collection.timeout_seconds}
 retries = {collection.retries}
 
 [export.todoist]
-# Enabling this requires a token, from either source below; a run with neither
-# fails immediately rather than at the first API call.
+# The export is on unless this says otherwise, and it needs a token from either
+# source below. A save always writes the key, so a true here with no token fails
+# the run outright rather than quietly writing nothing.
 enabled = {_toml_bool(todoist.enabled)}
 # Prefer {TOKEN_ENV_VAR} over storing the token here. A cron run gets it from
 # the env file next to this one, which run-job.sh sources before every run; when

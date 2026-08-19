@@ -80,8 +80,10 @@ def test_a_preview_says_when_todoist_would_be_queried(state_path, caplog):
 
 
 def test_a_preview_of_a_disabled_target_says_so(state_path, caplog):
+    off = make_config(todoist=TodoistExportConfig(enabled=False))
+
     with caplog.at_level("INFO"):
-        data_export.preview([RESTAFVAL], make_config(), state_path=state_path, today=TODAY)
+        data_export.preview([RESTAFVAL], off, state_path=state_path, today=TODAY)
 
     assert "disabled" in caplog.text
 

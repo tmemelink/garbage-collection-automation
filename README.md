@@ -169,7 +169,7 @@ writes them in; everything else is edited there afterwards.
 | `collection.due_time` | `"07:00"` | Due moment on the collection day, Europe/Amsterdam |
 | `collection.types` | `["restafval", "papier", "gft"]` | `restafval`, `papier`, `gft`, `pmd`, `glas`, `textiel`, `kca`, `kerstbomen` |
 | `collection.timeout_seconds` / `.retries` | `15` / `1` | Limits on the single request per run |
-| `export.todoist.enabled` / `.token` / `.project` | `false` / — / `"Home"` | The Todoist target |
+| `export.todoist.enabled` / `.token` / `.project` | `true` / — / `"Home"` | The Todoist target; on unless the file says otherwise, and skipped with a log line when no token is configured |
 | `export.todoist.remind_days_before` | `1` | How long before the collection the reminder goes off |
 | `web.enabled` | `false` | Whether the local page is served at all |
 | `web.host` / `.port` | `"127.0.0.1"` / `8080` | Loopback addresses and unprivileged ports only |

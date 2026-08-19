@@ -141,9 +141,9 @@ def test_a_moved_schedule_is_reconciled_against_todoist(state_path):
 
 
 def test_a_disabled_target_leaves_todoist_alone(state_path):
-    result = application.run(
-        make_config(), state_path=state_path, client=UnreachableTodoist(), today=TODAY
-    )
+    off = make_config(todoist=TodoistExportConfig(enabled=False))
+
+    result = application.run(off, state_path=state_path, client=UnreachableTodoist(), today=TODAY)
 
     assert result.status is Status.OK
     assert result.collections == (RESTAFVAL, GFT)
