@@ -110,6 +110,7 @@ def source(tmp_path):
     (src / "uv.lock").write_text("# resolved at build time\n")
     (src / ".python-version").write_text("3.14\n")
     (src / "README.md").write_text("# readme\n")
+    (src / "LICENSE").write_text("Apache-2.0\n")
     (src / "src" / "run-job.sh").write_text("#!/bin/sh\n")
     (src / "ui" / "static").mkdir(parents=True)
     (src / "ui" / "index.html").write_text("<!doctype html>\n")
@@ -138,6 +139,17 @@ def test_everything_uv_reads_reaches_the_install_dir(tmp_path, source):
     assert (installed / ".python-version").exists()
     assert (installed / "src" / "garbage_collection_automation" / "__init__.py").exists()
     assert (installed / "bin" / "run-job.sh").exists()
+    assert (installed / "LICENSE").exists()
+
+
+def test_a_source_without_a_license_says_so_instead_of_failing_inside_uv(tmp_path, source):
+    """pyproject.toml's license-files makes LICENSE part of the build, not a nicety."""
+    (source / "LICENSE").unlink()
+
+    result = run_step("install_app", tmp_path, source)
+
+    assert result.returncode != 0
+    assert "LICENSE" in result.stderr
 
 
 def test_a_source_without_a_lockfile_says_so_instead_of_reusing_a_stale_one(tmp_path, source):

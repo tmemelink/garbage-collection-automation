@@ -63,6 +63,7 @@ def test_the_bundle_carries_what_the_installer_reads(bundle):
         "install.sh",
         "pyproject.toml",
         ".python-version",
+        "LICENSE",
         "src/run-job.sh",
         "src/garbage_collection_automation/__init__.py",
         "scheduling/garbage-collection-automation.cron",

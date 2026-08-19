@@ -175,6 +175,11 @@ install_app() {
     rm -rf "${INSTALL_DIR}/src"
     cp -a "${SRC_DIR}/src" "${INSTALL_DIR}/src"
     cp -a "${SRC_DIR}/pyproject.toml" "${INSTALL_DIR}/pyproject.toml"
+    # pyproject.toml points license-files at LICENSE, so uv's build backend
+    # refuses the project when the file is absent: it is not optional here.
+    [ -f "${SRC_DIR}/LICENSE" ] \
+        || die "the source has no LICENSE, which pyproject.toml's license-files requires"
+    cp -a "${SRC_DIR}/LICENSE" "${INSTALL_DIR}/LICENSE"
     for optional in uv.lock .python-version README.md; do
         if [ -f "${SRC_DIR}/${optional}" ]; then
             cp -a "${SRC_DIR}/${optional}" "${INSTALL_DIR}/${optional}"
