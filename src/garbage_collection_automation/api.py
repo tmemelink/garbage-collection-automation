@@ -125,14 +125,16 @@ def _config_payload(config: Config, paths: Paths) -> dict:
 def _writable(path: Path) -> bool:
     """Whether a save would land. The installer decides this, not the page.
 
-    A save is a temp file next to the config and a rename over it, so the
-    directory has to allow it - and the file itself has to as well, but only
-    once there is one: ``configuration.save()`` writes a config that is not
-    there yet rather than refusing. This asks the same question in advance, and
-    has to answer it the same way, or the page grays out a button that works.
+    A save rewrites the file itself where that is all it may do - the installed
+    /etc directory belongs to root - and replaces it through a temp file where
+    the directory allows one. Either way the file's own mode is the answer, and
+    the directory's only matters while there is no file yet: ``save()`` writes a
+    config that is not there rather than refusing. This asks the same question in
+    advance, and has to answer it the same way, or the page grays out a button
+    that works.
     """
-    if path.exists() and not os.access(path, os.W_OK):
-        return False
+    if path.exists():
+        return os.access(path, os.W_OK)
     return os.access(path.parent, os.W_OK | os.X_OK)
 
 

@@ -10,6 +10,7 @@ either kept or quietly broken.
 from __future__ import annotations
 
 import os
+import shlex
 import shutil
 import subprocess
 import textwrap
@@ -118,7 +119,7 @@ def source(tmp_path):
     (src / "ui" / "mockups").mkdir()
     (src / "ui" / "mockups" / "mockup-1.png").write_bytes(b"\x89PNG not really\n")
     (src / "src" / "garbage_collection_automation" / "__init__.py").write_text("")
-    (src / "config" / "config.example.toml").write_text('[address]\npostcode = "1234AB"\n')
+    shutil.copy(REPO_ROOT / "config" / "config.example.toml", src / "config")
     return src
 
 
@@ -186,24 +187,32 @@ def test_the_config_is_written_once_and_then_left_alone(tmp_path, source):
     assert "keeping existing" in second.stdout
 
 
-def test_the_config_belongs_to_the_service_user_so_the_page_can_save_it(tmp_path, source):
-    """A save is a temp file plus a rename, so the file and its directory both."""
+def test_the_config_is_group_writable_so_the_page_can_save_it(tmp_path, source):
+    """A save rewrites the file itself, so the interface costs one bit on one file."""
     result = run_step("install_config", tmp_path, source)
     assert result.returncode == 0, result.stderr
 
-    assert owner_of(tmp_path, "config.toml") == "nobody"
-    mode = (tmp_path / "etc").stat().st_mode & 0o7777
-    assert mode & 0o020, "the service user cannot create the temp file to rename"
-    assert mode & 0o1000, "without the sticky bit it could also replace env"
+    assert owner_of(tmp_path, "config.toml") == "root"
+    assert (tmp_path / "etc" / "config.toml").stat().st_mode & 0o777 == 0o660
 
 
-def test_without_the_web_interface_the_config_stays_root_s(tmp_path, source):
-    """Nothing but root writes it then, and the widening would buy nothing."""
+def test_the_config_directory_stays_root_s_whoever_may_write_the_file(tmp_path, source):
+    """The env file lives there; the service user creating things next to it is the risk."""
+    for interface in ("1", "0"):
+        result = run_step("install_config", tmp_path, source, INSTALL_WEB=interface)
+        assert result.returncode == 0, result.stderr
+
+        assert owner_of(tmp_path, str(tmp_path / "etc")) == "root"
+        assert (tmp_path / "etc").stat().st_mode & 0o7777 == 0o750
+
+
+def test_without_the_web_interface_nothing_but_root_may_write_the_config(tmp_path, source):
+    """Nothing else writes it then, and the widening would buy nothing."""
     result = run_step("install_config", tmp_path, source, INSTALL_WEB="0")
     assert result.returncode == 0, result.stderr
 
     assert owner_of(tmp_path, "config.toml") == "root"
-    assert (tmp_path / "etc").stat().st_mode & 0o7777 == 0o750
+    assert (tmp_path / "etc" / "config.toml").stat().st_mode & 0o777 == 0o640
 
 
 def test_an_upgrade_that_adds_the_page_hands_the_existing_config_over(tmp_path, source):
@@ -216,7 +225,17 @@ def test_an_upgrade_that_adds_the_page_hands_the_existing_config_over(tmp_path, 
 
     assert second.returncode == 0, second.stderr
     assert "edited by hand" in config.read_text(), "an upgrade must not rewrite it"
-    assert owner_of(tmp_path, "config.toml") == "nobody"
+    assert config.stat().st_mode & 0o777 == 0o660
+
+
+def test_an_upgrade_that_drops_the_page_takes_the_write_bit_back(tmp_path, source):
+    """--no-web is the other direction of the same decision."""
+    assert run_step("install_config", tmp_path, source).returncode == 0
+
+    second = run_step("install_config", tmp_path, source, INSTALL_WEB="0")
+
+    assert second.returncode == 0, second.stderr
+    assert (tmp_path / "etc" / "config.toml").stat().st_mode & 0o777 == 0o640
 
 
 def test_the_env_file_is_written_once_and_then_left_alone(tmp_path, source):
@@ -240,6 +259,151 @@ def test_the_env_file_the_installer_writes_holds_no_token_of_its_own(tmp_path, s
     assert not [
         line for line in written.splitlines() if line.strip() and not line.startswith("#")
     ], "the template must be comments only"
+
+
+def test_the_env_file_is_handed_back_to_root_on_every_install(tmp_path, source):
+    """Re-running the installer is the repair for a file an interrupted one left."""
+    assert run_step("install_config", tmp_path, source).returncode == 0
+    env_file = tmp_path / "etc" / "env"
+    env_file.chmod(0o666)
+
+    assert run_step("install_config", tmp_path, source).returncode == 0
+
+    assert owner_of(tmp_path, "env") == "root", "a kept file is still chowned back"
+    assert env_file.stat().st_mode & 0o777 == 0o640
+
+
+def test_a_config_file_root_cannot_write_is_reported_rather_than_hidden(tmp_path, source):
+    """An editor that will not save is what storage squashing root looks like from here.
+
+    None of the causes show up in the mode line, so the check opens the files
+    the way an editor would and prints what the kernel says back.
+    """
+    assert run_step("install_config", tmp_path, source).returncode == 0
+    config = tmp_path / "etc" / "config.toml"
+    config.chmod(0o444)
+    try:
+        result = run_step("verify_config_is_editable", tmp_path, source)
+    finally:
+        config.chmod(0o600)
+
+    assert result.returncode == 0, "the install is finished by then; this is a warning"
+    assert "cannot write" in result.stderr
+    assert "Permission denied" in result.stderr
+    assert "-r--r--r--" in result.stderr, "the modes as they actually are, not as intended"
+
+
+def test_config_files_that_can_be_written_are_passed_over_in_silence(tmp_path, source):
+    """It is the last thing an install prints; a clean one has nothing to say here."""
+    assert run_step("install_config", tmp_path, source).returncode == 0
+
+    result = run_step("verify_config_is_editable", tmp_path, source)
+
+    assert result.returncode == 0, result.stderr
+    assert "cannot write" not in result.stderr
+
+
+# --- the two answers a first install cannot guess --------------------------------------
+
+
+def test_the_answers_land_in_the_config_the_installer_writes(tmp_path, source):
+    """The example file is the template, so the comments around them have to survive."""
+    result = run_step(
+        "install_config",
+        tmp_path,
+        source,
+        POSTCODE="1234ab",
+        HOUSE_NUMBER="56",
+        ADDITION="A",
+        API_KEY="the-app-key",
+    )
+    assert result.returncode == 0, result.stderr
+
+    written = (tmp_path / "etc" / "config.toml").read_text()
+    assert 'postcode = "1234AB"' in written, "a postcode is stored the way the app stores it"
+    assert 'house_number = "56"' in written
+    assert 'addition = "A"' in written
+    assert 'api_key = "the-app-key"' in written
+    assert "# Looked up at mijnafvalwijzer.nl" in written
+
+
+def test_a_key_holding_a_character_sed_reads_lands_intact(tmp_path, source):
+    """What an API key may hold is the API's business, not the substitution's."""
+    result = run_step("install_config", tmp_path, source, API_KEY="a&b|c")
+    assert result.returncode == 0, result.stderr
+
+    assert 'api_key = "a&b|c"' in (tmp_path / "etc" / "config.toml").read_text()
+
+
+def test_an_install_that_answered_nothing_writes_the_example_unchanged(tmp_path, source):
+    """--no-prompt and a container with no terminal both end here; it must still be a config."""
+    result = run_step("install_config", tmp_path, source)
+    assert result.returncode == 0, result.stderr
+
+    written = (tmp_path / "etc" / "config.toml").read_text()
+    assert written == (source / "config" / "config.example.toml").read_text()
+
+
+def test_the_answers_can_be_given_on_the_command_line(tmp_path, source):
+    """`pct exec` has no terminal to ask on, so the flags are the whole answer there."""
+    result = run_step(
+        'parse_args --postcode "1234 ab" --house-number 56 --addition A --api-key k3y-.~\n'
+        'echo "[${POSTCODE}][${HOUSE_NUMBER}][${ADDITION}][${API_KEY}][${ASK_CONFIG}]"\n'
+        'parse_args --no-prompt; echo "declined=[${ASK_CONFIG}]"',
+        tmp_path,
+        source,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "[1234ab][56][A][k3y-.~][1]" in result.stdout, "a pasted space is not part of a postcode"
+    assert "declined=[0]" in result.stdout
+
+
+@pytest.mark.parametrize(
+    ("flag", "value", "complaint"),
+    [
+        ("--postcode", "12AB", "not a Dutch postcode"),
+        ("--house-number", "56A", "digits only"),
+        ("--addition", "a b/c", "letters and digits"),
+        ("--api-key", 'say "what"', "config.toml can hold"),
+    ],
+)
+def test_an_answer_the_application_would_reject_stops_the_install(
+    tmp_path, source, flag, value, complaint
+):
+    """Caught here, or by the first run a week later - the flag is where it is cheap."""
+    result = run_step(f"parse_args {flag} {shlex.quote(value)}", tmp_path, source)
+
+    assert result.returncode != 0
+    assert complaint in result.stderr
+
+
+def test_an_upgrade_does_not_ask_for_answers_it_already_has(tmp_path, source):
+    """The config file it keeps holds them, and asking again would look like it does not."""
+    (tmp_path / "etc").mkdir()
+    (tmp_path / "etc" / "config.toml").write_text('[address]\npostcode = "1234AB"\n')
+
+    result = run_step(
+        'have_terminal() { return 0; }\nask_field() { echo "asked for $2"; }\nask_config',
+        tmp_path,
+        source,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "asked for" not in result.stdout
+
+
+def test_an_install_with_no_terminal_writes_the_example_rather_than_hanging(tmp_path, source):
+    """pct exec, cloud-init and CI have no tty; the installer has to finish, not wait."""
+    result = run_step(
+        'ask_config; echo "answered=[${POSTCODE}]"',
+        tmp_path,
+        source,
+        detached=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "answered=[]" in result.stdout
 
 
 def test_the_page_reaches_the_install_dir(tmp_path, source):

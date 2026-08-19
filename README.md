@@ -88,11 +88,32 @@ pct exec <vmid> -- bash -c 'curl -fsSL https://raw.githubusercontent.com/tmemeli
 ```
 Pin a tag for reproducible installs: `... | bash -s -- --ref v0.1.0`.
 
+A first install asks for the two things it cannot guess — the address to look up
+and the mijnafvalwijzer.nl app key — and writes them into `config.toml`:
+
+```
+==> Configuration. Press enter to leave one out; /etc/garbage-collection-automation/config.toml
+    then keeps the example value, and the first run says which.
+
+    Postcode [1234AB]: 1234 AB
+    House number [56]: 56
+    Addition, if any:
+    Afvalwijzer API key: ...
+```
+
+Each answer is checked as it is typed, against the same rules the application
+applies. An upgrade never asks: the config file it keeps already holds them.
+Where there is no terminal to ask on — `pct exec`, cloud-init, CI — the answers
+are the `--postcode`, `--house-number`, `--addition` and `--api-key` flags, and
+without those the example values are written and the first run says so.
+
 
 ### Installer options
 
 The installer is idempotent — re-run it to upgrade. It never overwrites an
-existing config file or the env file holding the secrets.
+existing config file or the env file holding the secrets. It does re-apply their
+ownership and permissions on every run, so an install that was interrupted is
+repaired by running it again.
 
 | Option | Effect |
 | --- | --- |
@@ -100,6 +121,9 @@ existing config file or the env file holding the secrets.
 | `--source <path>` | Install from a local directory or tarball instead of downloading |
 | `--no-schedule` | Install without adding the cron entry |
 | `--no-web` | Install without the web interface service (and remove it if present) |
+| `--postcode` / `--house-number` / `--addition` | The address, answered in advance |
+| `--api-key <key>` | The mijnafvalwijzer.nl app key, answered in advance |
+| `--no-prompt` | Do not ask for either; write the example values |
 | `--run-now` / `--no-run-now` | Answer the "run it once now?" question in advance |
 | `--uninstall` | Remove app, user and schedule; keeps config, state and logs |
 
@@ -112,7 +136,7 @@ the environment.
 | Path | Contents |
 | --- | --- |
 | `/opt/garbage-collection-automation` | Application and its virtualenv |
-| `/etc/garbage-collection-automation/config.toml` | Configuration — **edit this first** |
+| `/etc/garbage-collection-automation/config.toml` | Configuration — the installer writes the answers it asked for |
 | `/etc/garbage-collection-automation/env` | Secrets, `KEY=value` per line |
 | `/root/run-garbage-collection.sh` | The by-hand command |
 | `/etc/cron.d/garbage-collection-automation` | Schedule, 04:00 every Saturday by default |
@@ -120,12 +144,22 @@ the environment.
 | `/var/lib/garbage-collection-automation/` | `state.json` and the run lock |
 | `/var/log/garbage-collection-automation/` | Job output, rotated weekly |
 
+`/etc/garbage-collection-automation/` and both files in it belong to `root`, and
+only `root` may create or remove anything there — so an editor run as root meets
+an ordinary root-owned file, and the service user cannot put anything next to the
+file holding the tokens. The one concession the web interface asks for is that
+`config.toml` is group-writable by the service user (mode `0660`, group `gca`),
+which is what its *Save configuration* button needs; `--no-web` installs it `0640`
+and nothing but root writes it. The installer checks at the end that root really
+can write both files, and says so with the kernel's own words when it cannot.
+
 
 ## Configuration
 
 Configuration lives in `/etc/garbage-collection-automation/config.toml`; see
 [config/config.example.toml](config/config.example.toml) for the annotated
-template. Set your postcode and house number there before the first run.
+template. The installer asks for the postcode, house number and app key and
+writes them in; everything else is edited there afterwards.
 
 | Key | Default | Meaning |
 | --- | --- | --- |
@@ -228,7 +262,7 @@ far they are allowed to get:
 | *Collect now* | `POST /api/collect` | mijnafvalwijzer.nl | nothing — a dry run |
 | *Check Todoist* | `POST /api/check` | also Todoist | nothing |
 | *Apply delta* | `POST /api/apply` | also Todoist | the to-dos, and `state.json` |
-| *Save configuration* | `POST /api/config` | the form | `config.toml` |
+| *Save configuration* | `POST /api/config` | the form | `config.toml`, rewritten in place |
 
 `GET /api/state` returns the configuration, the last run and the cron line
 without touching the network — it is what the page draws itself from.

@@ -378,19 +378,38 @@ def test_a_failed_write_leaves_the_old_file_alone(write_config):
     assert path.read_text() == before
 
 
-def test_nothing_is_left_behind_when_a_write_fails(tmp_path):
-    """The temporary file is the one the real one is replaced with; it must not linger."""
+def test_a_save_rewrites_the_file_itself_when_the_directory_is_closed_to_it(tmp_path):
+    """The installed /etc directory is root's; the one file the page may write, it writes."""
     path = tmp_path / "sub" / "config.toml"
     path.parent.mkdir()
     path.write_text(MINIMAL)
     path.parent.chmod(0o500)  # readable and enterable, not writable
     try:
-        with pytest.raises(ConfigError):
-            configuration.save(path, configuration.load(path))
+        configuration.save(path, configuration.load(path), api_key="the-app-key")
+
+        assert 'api_key = "the-app-key"' in path.read_text()
+        assert sorted(item.name for item in path.parent.iterdir()) == ["config.toml"]
     finally:
         path.parent.chmod(0o700)
 
-    assert sorted(item.name for item in path.parent.iterdir()) == ["config.toml"]
+
+def test_a_config_nobody_may_write_is_refused_rather_than_replaced(tmp_path):
+    """A rename would go around the file's own mode; that mode is the answer.
+
+    It is also what the page asks before it offers the button, so the two have
+    to agree - and nothing may linger next to a save that was turned down.
+    """
+    path = tmp_path / "config.toml"
+    path.write_text(MINIMAL)
+    path.chmod(0o444)
+    try:
+        with pytest.raises(ConfigError, match="not writable"):
+            configuration.save(path, configuration.load(path))
+
+        assert path.read_text() == MINIMAL
+        assert sorted(item.name for item in tmp_path.iterdir()) == ["config.toml"]
+    finally:
+        path.chmod(0o600)
 
 
 def test_the_document_a_save_writes_is_the_one_load_accepts():

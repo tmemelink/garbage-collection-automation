@@ -448,26 +448,51 @@ def save(path: Path, config: Config, *, token: str = "", api_key: str = "") -> N
             f"refusing to write a configuration that cannot be read back: {exc}"
         ) from exc
 
-    # The write is a temp file plus a rename, which the kernel allows on a file
-    # nobody may write as long as its directory is writable. That is not what the
-    # mode on the file means to the person who set it, and it is what the page
-    # asks about before it offers the button, so honour it here.
+    # A rename over the file would let anyone who may write the *directory*
+    # replace a file they may not write. That is not what the mode on the file
+    # means to the person who set it, and it is what the page asks about before
+    # it offers the button, so honour it here.
     if path.exists() and not os.access(path, os.W_OK):
         raise ConfigError(f"cannot write {path}: it is not writable")
 
-    tmp = path.with_name(f".{path.name}.tmp")
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
+        if os.access(path.parent, os.W_OK | os.X_OK):
+            _write_by_rename(path, document)
+        else:
+            # The installed layout: /etc/<app> belongs to root and is not the
+            # service user's to create anything in - it holds the env file - so
+            # the one file that user may write, it writes in place. The document
+            # was parsed above before a byte of it was written, which is what
+            # makes the moment the file is short less of a risk than a directory
+            # this program may add files to.
+            _write_in_place(path, document)
+    except OSError as exc:
+        raise ConfigError(f"cannot write {path}: {exc}") from exc
+
+
+def _write_by_rename(path: Path, document: str) -> None:
+    """Replace *path* through a temp file next to it, so no reader sees it half-written."""
+    tmp = path.with_name(f".{path.name}.tmp")
+    try:
         tmp.write_text(document, encoding="utf-8")
         # Take the mode of the file being replaced: the installer decides who may
         # read the config, and a save must not quietly widen that.
         with contextlib.suppress(OSError):
             os.chmod(tmp, stat.S_IMODE(path.stat().st_mode))
         tmp.replace(path)
-    except OSError as exc:
+    except OSError:
         with contextlib.suppress(OSError):
             tmp.unlink()
-        raise ConfigError(f"cannot write {path}: {exc}") from exc
+        raise
+
+
+def _write_in_place(path: Path, document: str) -> None:
+    """Rewrite *path* itself, keeping its owner and mode - and its directory shut."""
+    with path.open("w", encoding="utf-8") as handle:
+        handle.write(document)
+        handle.flush()
+        os.fsync(handle.fileno())
 
 
 def from_data(data: dict) -> Config:

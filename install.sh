@@ -27,6 +27,16 @@ INSTALL_WEB=1
 RUN_NOW=""                    # "" ask when there is a terminal, 1 always, 0 never
 CONFIG_WAS_NEW=0
 
+# The values a first install cannot guess: whose address to look up, and the key
+# the schedule API expects. Empty means unanswered - --no-prompt and an install
+# with no terminal leave the example values in config.toml, and the first run is
+# then the thing that says which one it stopped on.
+POSTCODE=""
+HOUSE_NUMBER=""
+ADDITION=""
+API_KEY=""
+ASK_CONFIG=1
+
 # The by-hand command lands in root's home rather than in $HOME: this installer
 # is usually reached through `pct exec` or a pipe, neither of which reliably sets
 # HOME, and root's is the shell you land in with `pct enter`.
@@ -59,6 +69,14 @@ Usage: install.sh [options]
   --no-schedule       Install the application but do not add the cron entry.
   --no-web            Install the application but not the web interface service.
                       The port and whether it listens are [web] in config.toml.
+  --postcode <pc>     The address to look up, e.g. 1234AB.
+  --house-number <n>  Its house number, digits only.
+  --addition <a>      Its letter or suffix, when it has one.
+  --api-key <key>     The mijnafvalwijzer.nl app key ([collection] api_key).
+                      A first install asks for these four when they are not
+                      given and there is a terminal to ask on; an upgrade never
+                      asks, because the config file it keeps holds the answers.
+  --no-prompt         Do not ask for any of them; write the example values.
   --run-now           Run the job once when the install finishes, without asking.
   --no-run-now        Do not run it, and do not ask. Without either flag the
                       installer asks, and skips the question when there is no
@@ -78,6 +96,24 @@ parse_args() {
             --source)      SOURCE="${2:?--source needs a value}"; shift 2 ;;
             --no-schedule) INSTALL_SCHEDULE=0; shift ;;
             --no-web)      INSTALL_WEB=0; shift ;;
+            --postcode)    POSTCODE="$(squeeze "${2:?--postcode needs a value}")"
+                           valid_postcode "$POSTCODE" \
+                               || die "--postcode '${2}' is not a Dutch postcode, e.g. 1234AB"
+                           shift 2 ;;
+            --house-number)
+                           HOUSE_NUMBER="$(squeeze "${2:?--house-number needs a value}")"
+                           valid_house_number "$HOUSE_NUMBER" \
+                               || die "--house-number '${2}' must be digits only; a letter is --addition"
+                           shift 2 ;;
+            --addition)    ADDITION="$(squeeze "${2:?--addition needs a value}")"
+                           valid_addition "$ADDITION" \
+                               || die "--addition '${2}' must be letters and digits, e.g. A"
+                           shift 2 ;;
+            --api-key)     API_KEY="$(squeeze "${2:?--api-key needs a value}")"
+                           valid_api_key "$API_KEY" \
+                               || die "--api-key is not a value config.toml can hold"
+                           shift 2 ;;
+            --no-prompt)   ASK_CONFIG=0; shift ;;
             --run-now)     RUN_NOW=1; shift ;;
             --no-run-now)  RUN_NOW=0; shift ;;
             --uninstall)   uninstall; exit 0 ;;
@@ -90,6 +126,12 @@ parse_args() {
 # Debian 12 has systemd, but the installer must not fall over on a container that
 # was built without it: the job itself is cron, and only the web interface is a unit.
 has_systemd() { [ -d /run/systemd/system ]; }
+
+# Whether there is anyone to ask. Piping the installer to bash leaves stdin on
+# the script itself, so a question has to go to the terminal directly - and a
+# container filled by `pct exec`, cloud-init or CI has no terminal at all, where
+# every question this installer asks answers itself instead of hanging.
+have_terminal() { ( exec 3</dev/tty ) 2>/dev/null; }
 
 require_root() {
     [ "$(id -u)" -eq 0 ] || die "must run as root inside the container"
@@ -225,35 +267,128 @@ install_app() {
     fi
 }
 
-install_config() {
-    # Who owns config.toml is what decides whether the web interface's save
-    # button works. A save is a temp file plus a rename, so the service user
-    # needs the file and its directory both; without the interface nothing but
-    # root ever writes it and it stays root's. Re-running the installer with or
-    # without --no-web moves it either way.
-    local config_owner=root config_dir_mode=0750
-    if [ "$INSTALL_WEB" -eq 1 ]; then
-        config_owner="$APP_USER"
-        # Group-writable so the rename can land; sticky so that is all it buys.
-        # In a sticky directory only the owner of an entry may replace it, which
-        # keeps env - root's, and where the token lives - out of the service
-        # user's reach even though it may now write next to it.
-        config_dir_mode=1770
-    fi
+# What the four answers have to look like for the application to accept them:
+# the same rules configuration.py enforces, so a typo is caught here rather than
+# by the first run a week later. An empty answer never reaches these - skipping
+# is a choice, and the example value in the file says so.
+valid_postcode()     { [[ "$1" =~ ^[1-9][0-9]{3}[A-Za-z]{2}$ ]]; }
+valid_house_number() { [[ "$1" =~ ^[0-9]+$ ]]; }
+valid_addition()     { [[ "$1" =~ ^[A-Za-z0-9]{1,10}$ ]]; }
+# Not this project's value to define, so the check is only what the file needs:
+# one printable token with nothing in it a TOML basic string would have to escape.
+valid_api_key()      { [[ "$1" =~ ^[[:print:]]+$ ]] && [[ "$1" != *[\"\\]* ]]; }
 
-    install -d -o root -g "$APP_USER" -m "$config_dir_mode" "$CONFIG_DIR"
+# Whitespace is what a paste brings along, never part of a postcode, a house
+# number or a key. A postcode typed as "1234 AB" is the ordinary case.
+squeeze() { local value="$1"; printf '%s' "${value//[[:space:]]/}"; }
+
+# A sed replacement has two characters of its own: the delimiter below, and & for
+# whatever was matched. What an API key may hold is not this project's to decide,
+# so both are escaped here rather than forbidden above.
+sed_escape() { local value="${1//&/\\&}"; printf '%s' "${value//|/\\|}"; }
+
+# Asks for one answer until it is one the application would accept, and leaves it
+# in the variable named by $1. An answer already given on the command line is
+# kept; an empty one ends the asking, because a value left out is a value the
+# admin means to fill in later.
+ask_field() {
+    local name="$1" label="$2" example="$3" check="$4" hint="$5"
+    local prompt="    ${label}: " reply=""
+
+    [ -n "${!name}" ] && return 0
+    [ -n "$example" ] && prompt="    ${label} [${example}]: "
+
+    while :; do
+        printf '%s' "$prompt" > /dev/tty
+        read -r reply < /dev/tty || { reply=""; break; }
+        reply="$(squeeze "$reply")"
+        [ -z "$reply" ] && break
+        "$check" "$reply" && break
+        printf '    \033[1;33m%s\033[0m\n' "$hint" > /dev/tty
+        reply=""
+    done
+
+    printf -v "$name" '%s' "$reply"
+}
+
+# The address to look up and the key the schedule API expects: the two things
+# the installer cannot derive and the first run cannot do without. Asked at the
+# start, so the minutes of apt and uv that follow are unattended ones - and only
+# when there is something to ask (a config file already there belongs to the
+# admin, answers included) and somewhere to ask it.
+ask_config() {
+    [ "$ASK_CONFIG" -eq 0 ] && return 0
+    [ -f "${CONFIG_DIR}/config.toml" ] && return 0
+    have_terminal || return 0
+
+    printf '\n\033[1;32m==>\033[0m Configuration. Press enter to leave one out; %s\n    then keeps the example value, and the first run says which.\n\n' \
+        "${CONFIG_DIR}/config.toml" > /dev/tty
+
+    ask_field POSTCODE     "Postcode"            "1234AB" valid_postcode \
+        "four digits and two letters, e.g. 1234AB"
+    ask_field HOUSE_NUMBER "House number"        "56"     valid_house_number \
+        "digits only - a letter or suffix goes in the addition below"
+    ask_field ADDITION     "Addition, if any"    ""       valid_addition \
+        "letters and digits, e.g. A"
+    ask_field API_KEY      "Afvalwijzer API key" ""       valid_api_key \
+        "one token, no spaces - the README says where to read it off"
+    printf '\n' > /dev/tty
+}
+
+# The example file *is* the template: the answers replace four of its values and
+# every comment around them survives, which is most of what makes the installed
+# file worth reading. Each of the four keys appears in it exactly once and at the
+# start of a line, so a targeted substitution needs no TOML parser to be safe.
+render_config() {
+    local template="$1" target="$2"
+    # A no-op script first, so an install that answered nothing is still a copy
+    # rather than a sed with no script at all.
+    local -a edits=(-e '')
+
+    [ -n "$POSTCODE" ] \
+        && edits+=(-e "s|^postcode = .*|postcode = \"$(sed_escape "${POSTCODE^^}")\"|")
+    [ -n "$HOUSE_NUMBER" ] \
+        && edits+=(-e "s|^house_number = .*|house_number = \"$(sed_escape "$HOUSE_NUMBER")\"|")
+    [ -n "$ADDITION" ] \
+        && edits+=(-e "s|^addition = .*|addition = \"$(sed_escape "$ADDITION")\"|")
+    [ -n "$API_KEY" ] \
+        && edits+=(-e "s|^api_key = .*|api_key = \"$(sed_escape "$API_KEY")\"|")
+
+    sed "${edits[@]}" "$template" > "$target"
+}
+
+install_config() {
+    # Everything here is root's and stays root's: the directory, the config file
+    # and the env file next to it. That is the layout an administrator's editor
+    # expects, and it is what keeps the service user out of the directory that
+    # holds the token - it may write the one file it is given and create nothing.
+    #
+    # That one file is config.toml, which the web interface rewrites in place.
+    # Its group is the service user's, and whether the group may write it is the
+    # only thing the interface costs. Re-running the installer with or without
+    # --no-web moves that bit either way.
+    local config_mode=0640
+    [ "$INSTALL_WEB" -eq 1 ] && config_mode=0660
+
+    install -d -o root -g "$APP_USER" -m 0750 "$CONFIG_DIR"
     if [ -f "${CONFIG_DIR}/config.toml" ]; then
         log "keeping existing ${CONFIG_DIR}/config.toml"
-        # The contents are the admin's; the ownership is this install's decision,
-        # and an upgrade that added or dropped the interface has to move it.
-        chown "${config_owner}:${APP_USER}" "${CONFIG_DIR}/config.toml"
-        chmod 0640 "${CONFIG_DIR}/config.toml"
+        # The contents are the admin's; who may write them is this install's
+        # decision, and an upgrade that added or dropped the interface has to
+        # say so here.
+        chown "root:${APP_USER}" "${CONFIG_DIR}/config.toml"
+        chmod "$config_mode" "${CONFIG_DIR}/config.toml"
     else
-        log "writing default config to ${CONFIG_DIR}/config.toml"
-        install -o "$config_owner" -g "$APP_USER" -m 0640 \
-            "${SRC_DIR}/config/config.example.toml" "${CONFIG_DIR}/config.toml"
-        # It still holds the example address, which is what makes the run offered
-        # at the end of a first install a question worth qualifying.
+        log "writing ${CONFIG_DIR}/config.toml"
+        # Rendered next door first: mktemp gives it mode 0600, and it holds the
+        # API key for the moment between being written and being installed. It
+        # goes in the directory the EXIT trap clears, so an install that fails
+        # between the two does not leave the key in /tmp.
+        local rendered
+        rendered="$(mktemp "${TMPDIR_CLEANUP:-${TMPDIR:-/tmp}}/config.XXXXXX")"
+        render_config "${SRC_DIR}/config/config.example.toml" "$rendered"
+        install -o root -g "$APP_USER" -m "$config_mode" "$rendered" "${CONFIG_DIR}/config.toml"
+        rm -f "$rendered"
         CONFIG_WAS_NEW=1
     fi
 
@@ -278,9 +413,13 @@ install_config() {
 # only write the config.toml side. See the README for where to read it off.
 #GCA_AFVALWIJZER_API_KEY=
 ENVFILE
-        chown "root:${APP_USER}" "${CONFIG_DIR}/env"
-        chmod 0640 "${CONFIG_DIR}/env"
     fi
+
+    # Re-applied on every install rather than only when the file is written: an
+    # install that was interrupted, or one from a version that placed these
+    # differently, is then repaired by running the installer again.
+    chown "root:${APP_USER}" "${CONFIG_DIR}/env"
+    chmod 0640 "${CONFIG_DIR}/env"
 }
 
 install_schedule() {
@@ -436,14 +575,29 @@ verify() {
     warn "sudo is not installed, so this only proves root can run it"
 }
 
-# Piping the installer to bash leaves stdin on the script itself, so the question
-# has to go to the terminal directly. A container filled by `pct exec`, cloud-init
-# or CI has no terminal at all, and there the answer is no rather than a hang.
-ask_run_now() {
-    ( exec 3</dev/tty ) 2>/dev/null || return 1
+# The last thing that can still be wrong is the thing nobody checks: whether root
+# can open the files this installer just wrote. Storage that squashes root, a
+# stray immutable bit and a read-only mount all end the same way - an editor that
+# will not save - and none of them show up in the mode line, so the kernel's own
+# words for it are what gets printed here.
+verify_config_is_editable() {
+    local file error
+    for file in "${CONFIG_DIR}/config.toml" "${CONFIG_DIR}/env"; do
+        [ -f "$file" ] || continue
+        # Appending nothing opens the file for writing without changing a byte.
+        error="$( { : >> "$file"; } 2>&1 )" && continue
+        warn "root cannot write ${file}: ${error##*: }"
+        warn "$(stat -c '%n is %A %U:%G' "$CONFIG_DIR" "$file" 2>&1 | tr '\n' ';')"
+    done
+}
 
-    if [ "$CONFIG_WAS_NEW" -eq 1 ]; then
-        printf '\n    %s still holds the example address,\n    so a run now stops at the lookup - but it does prove the install.\n' \
+# Without a terminal to ask on the answer is no rather than a hang; see
+# have_terminal above for why stdin is not the thing that gets asked.
+ask_run_now() {
+    have_terminal || return 1
+
+    if [ "$CONFIG_WAS_NEW" -eq 1 ] && { [ -z "$POSTCODE" ] || [ -z "$API_KEY" ]; }; then
+        printf '\n    %s is still missing the address or the key,\n    so a run now stops at the lookup - but it does prove the install.\n' \
             "${CONFIG_DIR}/config.toml" > /dev/tty
     fi
     printf '\n\033[1;32m==>\033[0m Run it once now? [y/N] ' > /dev/tty
@@ -495,11 +649,21 @@ uninstall() {
 }
 
 summary() {
+    # What to say about the config file depends on how it got here: an upgrade
+    # kept one, a first install either wrote the answers down or wrote the
+    # example values, and only the last of those is still homework.
+    local config_note="<- edit this first"
+    if [ "$CONFIG_WAS_NEW" -eq 0 ]; then
+        config_note="<- kept from the install before this one"
+    elif [ -n "$POSTCODE" ] && [ -n "$API_KEY" ]; then
+        config_note="<- holds the address and key you gave"
+    fi
+
     cat <<SUMMARY
 
 $(log "${APP_NAME} installed")
 
-  Config     ${CONFIG_DIR}/config.toml   <- edit this first
+  Config     ${CONFIG_DIR}/config.toml   ${config_note}
   Secrets    ${CONFIG_DIR}/env           <- GCA_TODOIST_TOKEN, GCA_AFVALWIJZER_API_KEY
   Command    ${INSTALL_DIR}/.venv/bin/${APP_NAME}
   Schedule   /etc/cron.d/${APP_NAME}
@@ -528,6 +692,7 @@ main() {
     parse_args "$@"
     require_root
     check_platform
+    ask_config
     install_prereqs
     install_uv
     fetch_source
@@ -540,6 +705,7 @@ main() {
     install_logrotate
     reclaim_space
     verify
+    verify_config_is_editable
     summary
     maybe_run_now
 }
