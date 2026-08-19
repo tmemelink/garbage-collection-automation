@@ -1,0 +1,24 @@
+{
+  "response": "OK",
+  "data": {
+    "gemeente": "oosterhout",
+    "info": {
+      "postcode": "9999ZZ",
+      "huisnummer": "1",
+      "straat": "Teststraat",
+      "plaats": "Oosterhout",
+      "gemeenteName": "oosterhout",
+      "afvaldataVersion": "1787105593"
+    },
+    "ophaaldagen": {
+      "response": "NOK",
+      "data": [],
+      "error": "No data"
+    },
+    "ophaaldagenNext": {
+      "response": "NOK",
+      "data": [],
+      "error": "No data2"
+    }
+  }
+}

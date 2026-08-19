@@ -1,0 +1,54 @@
+# Configuration for garbage-collection-automation.
+# Installed to /etc/garbage-collection-automation/config.toml on first install
+# and never overwritten by later upgrades.
+
+[address]
+# Looked up at mijnafvalwijzer.nl; the addition is the letter or suffix, if any.
+postcode = "1234AB"
+house_number = "56"
+addition = ""
+
+[collection]
+# The key the schedule API expects: a fixed one the public afvalwijzer clients
+# all send, so not a per-user secret - but not ours to compile in either.
+# GCA_AFVALWIJZER_API_KEY wins over this key when it is set, exactly as the
+# Todoist token does; the README says where to read the value off.
+api_key = ""
+# How far ahead to look when building to-dos.
+lookahead_days = 30
+# The schedule publishes dates without a time, so this is the to-dos due moment
+# (Europe/Amsterdam, on the collection day itself).
+due_time = "07:00"
+# Which waste streams to track. Valid codes: restafval, papier, gft, pmd, glas,
+# textiel, kca, kerstbomen - not every municipality collects all of them.
+types = ["restafval", "papier", "gft"]
+# Be a polite guest on someone else's server.
+timeout_seconds = 15
+retries = 1
+
+[export.todoist]
+# Enabling this requires a token, from either source below; a run with neither
+# fails immediately rather than at the first API call.
+enabled = false
+# Prefer GCA_TODOIST_TOKEN over storing the token here. A cron run gets it from
+# the env file next to this one - /etc/garbage-collection-automation/env - which
+# run-job.sh sources before every run.
+token = ""
+project = "Home"
+# How long before the collection moment the to-dos reminder goes off, in days.
+# The to-dos themselves are created for the whole lookahead window above.
+remind_days_before = 1
+
+[web]
+# The local page: a small server that hands out the interface in ui/ and nothing
+# else. Switch it on here, then restart it:
+#   systemctl restart garbage-collection-automation-web
+enabled = false
+# It listens on the loopback interface only - the page has no login and shows the
+# secrets, so only a loopback address is accepted here. Reach it from another
+# machine over an ssh tunnel; the README has the command.
+host = "127.0.0.1"
+port = 8080
+
+[logging]
+level = "INFO"

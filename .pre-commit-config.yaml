@@ -1,0 +1,74 @@
+# What runs before every commit. See "Pre-commit hooks" in the README.
+#
+#   uv run pre-commit install          once per checkout, then it is automatic
+#   uv run pre-commit run --all-files  everything, without committing
+#
+# Hooks only ever see staged files, so the gitignored ones that hold the real
+# secrets - config/config.toml, config/env - are never scanned or rewritten.
+
+repos:
+  # Python: fix what can be fixed, then lay it out. Both rewrite files, so the
+  # commit stops and asks you to look at what changed and stage it.
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.16.3
+    hooks:
+      - id: ruff-check
+        args: [--fix]
+      - id: ruff-format
+
+  # The lock file is what an install resolves against; a pyproject.toml edit
+  # that forgets it makes the container build something the tests never ran.
+  - repo: https://github.com/astral-sh/uv-pre-commit
+    rev: 0.12.5
+    hooks:
+      - id: uv-lock
+
+  # A thousand lines of bash, one of which is piped into a root shell over the
+  # network. Unquoted variables and typo'd tests belong nowhere near that.
+  - repo: https://github.com/shellcheck-py/shellcheck-py
+    rev: v0.11.0.1
+    hooks:
+      - id: shellcheck
+
+  # An API key or a Todoist token pasted into a config example, a test or a
+  # captured fixture. Known false positives live in .secrets.baseline; add to it
+  # with `uv run detect-secrets scan --baseline .secrets.baseline`.
+  - repo: https://github.com/Yelp/detect-secrets
+    rev: v1.5.0
+    hooks:
+      - id: detect-secrets
+        args: [--baseline, .secrets.baseline]
+
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v6.0.0
+    hooks:
+      # An ssh or TLS private key, which no part of this repository needs.
+      - id: detect-private-key
+
+      # Config the application parses at startup, and fixtures the tests replay:
+      # a syntax error here fails a scheduled run, not a test.
+      - id: check-toml
+      - id: check-json
+      - id: check-yaml
+
+      # Build output, a virtualenv, a coverage database. dist/ is gitignored,
+      # but `git add -f` is one keystroke away. The mockup PNG sets the ceiling.
+      - id: check-added-large-files
+        args: [--maxkb=1500]
+
+      # The scripts are invoked by path - by cron, by systemd, by the installer.
+      # One without its executable bit is a job that never runs.
+      - id: check-executables-have-shebangs
+      - id: check-shebang-scripts-are-executable
+
+      # Conflict markers, and names that collide on a case-insensitive
+      # filesystem - both of which only fail on someone else's machine.
+      - id: check-merge-conflict
+      - id: check-case-conflict
+
+      # Whitespace only, but it is what turns a one-line diff into a page of
+      # them. CRLF matters more: these files are shipped to a Debian container.
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: mixed-line-ending
+        args: [--fix=lf]

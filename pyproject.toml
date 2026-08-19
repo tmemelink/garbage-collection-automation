@@ -1,0 +1,71 @@
+[project]
+name = "garbage-collection-automation"
+version = "0.1.0"
+description = "Collects garbage collection dates and creates to-dos."
+readme = "README.md"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+authors = [
+    { name = "Thomas Memelink" }
+]
+requires-python = ">=3.14"
+dependencies = ["httpx>=0.28"]
+
+[project.urls]
+Repository = "https://github.com/tmemelink/garbage-collection-automation"
+Issues = "https://github.com/tmemelink/garbage-collection-automation/issues"
+
+[project.scripts]
+garbage-collection-automation = "garbage_collection_automation:main"
+garbage-collection-automation-web = "garbage_collection_automation.web:main"
+
+[dependency-groups]
+dev = [
+    "detect-secrets>=1.5.0",
+    "pre-commit>=4.6.2",
+    "pytest>=8.3",
+    "pytest-cov>=6.0",
+    "ruff>=0.16.3",
+]
+
+[tool.ruff]
+# What this repository already writes; the default 88 would rewrap most of it.
+line-length = 100
+
+[tool.ruff.lint]
+select = [
+    "A",    # names that shadow a builtin
+    "B",    # bugbear: the mistakes that still run
+    "C4",   # comprehensions written the long way
+    "E",    # pycodestyle
+    "F",    # pyflakes: undefined names, unused imports
+    "I",    # import order
+    "RUF",  # ruff's own, incl. stale noqa
+    "S",    # bandit: subprocess, tempfiles, the request without a timeout
+    "SIM",  # branches that collapse into one
+    "UP",   # syntax older than the 3.14 this targets
+    "W",    # pycodestyle warnings
+]
+ignore = [
+    "E501",  # the formatter sets the width; what it will not wrap is deliberate
+    "S105",  # a name like TOKEN_ENV_VAR is not a token - detect-secrets does secrets
+    "S106",
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = [
+    "S101",  # a test without assert is not a test
+    "S104",  # asserting "0.0.0.0" is refused means naming it
+    "S603",  # the point of the shell tests is to run install.sh and run-job.sh
+    "S607",  # ... found on PATH, as cron and the installer's reader would
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.coverage.run]
+source = ["garbage_collection_automation"]
+
+[build-system]
+requires = ["uv_build>=0.12.5,<0.13.0"]
+build-backend = "uv_build"

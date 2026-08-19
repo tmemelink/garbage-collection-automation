@@ -1,0 +1,12 @@
+# Schedule for garbage-collection-automation.
+# Installed to /etc/cron.d/ by install.sh, which substitutes the @PLACEHOLDER@ values.
+# Fields: minute hour day-of-month month day-of-week user command
+
+SHELL=/bin/bash
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+MAILTO=""
+
+# Saturday at 04:00, refresh the collection schedule. Once a week is enough: the
+# lookahead window is 30 days, so every run leaves weeks of to-dos standing ahead
+# of it, and the source rarely moves a date. Day-of-week 6 is Saturday.
+0 4 * * 6  @APP_USER@  @INSTALL_DIR@/bin/run-job.sh >> @LOG_DIR@/cron.log 2>&1

@@ -1,0 +1,57 @@
+# Service unit for the local web interface of garbage-collection-automation.
+# Installed to /etc/systemd/system/ by install.sh, which substitutes the
+# @PLACEHOLDER@ values. The job itself is a cron entry, not a service; this is
+# the only part of the project that stays running.
+#
+# Whether it actually listens is [web] enabled in config.toml: with that false
+# the process says so and exits 0, so the unit is installed and enabled either
+# way and the config file stays the single switch.
+
+[Unit]
+Description=Garbage collection automation web interface
+Documentation=https://github.com/tmemelink/garbage-collection-automation
+After=network.target
+# A crash loop on a port that is taken should not be hidden by endless restarts.
+StartLimitIntervalSec=60
+StartLimitBurst=3
+
+[Service]
+Type=exec
+User=@APP_USER@
+Group=@APP_USER@
+# The same file the cron job reads its secrets from; optional, hence the leading -.
+EnvironmentFile=-@CONFIG_DIR@/env
+# --ui-dir and --state are passed rather than left to their defaults: the unit
+# knows the installed layout, and the defaults are derived - --ui-dir from where
+# the package was imported from, --state from a constant that happens to agree.
+# The state file is the one the cron job writes, so the page reads the same last
+# run, and run.lock next to it is the same lock the weekly run takes.
+ExecStart=@INSTALL_DIR@/.venv/bin/garbage-collection-automation-web --config @CONFIG_DIR@/config.toml --ui-dir @INSTALL_DIR@/ui --state @STATE_DIR@/state.json
+Restart=on-failure
+RestartSec=5
+
+# It reads a config file and a directory of static files, listens on loopback,
+# and needs nothing else. Everything below removes something it does not use;
+# drop a line here if a container refuses it rather than weakening the lot.
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+# strict leaves the whole filesystem read-only, and the page's buttons write two
+# things: the save rewrites @CONFIG_DIR@/config.toml, and applying the delta
+# writes state.json and takes run.lock in @STATE_DIR@. Nothing else, hence only
+# these two - the log directory is not here because this service logs to the
+# journal, and /etc/cron.d is not here because the schedule is only ever shown.
+ReadWritePaths=@CONFIG_DIR@ @STATE_DIR@
+ProtectHome=yes
+ProtectControlGroups=yes
+ProtectKernelTunables=yes
+RestrictSUIDSGID=yes
+RestrictNamespaces=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+LockPersonality=yes
+CapabilityBoundingSet=
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+
+[Install]
+WantedBy=multi-user.target

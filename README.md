@@ -1,2 +1,382 @@
 # garbage-collection-automation
-The project contains a small service that scrapes garbage collection data and creates todo's and a subscribable calendar..
+
+A small service that looks up your household waste collection dates and turns
+them into Todoist to-dos. It runs as a weekly cron job in a Debian 12 LXC
+container, with an optional local web page to inspect and trigger it by hand.
+
+While this project is built around a Debian 12 LXC target - installation should work on any Debian-based OS.
+
+Dates come from the [mijnafvalwijzer.nl](https://www.mijnafvalwijzer.nl) JSON
+API — one request per run, for one address.
+
+> **Status:** the Todoist client is still being built. Collecting, processing
+> and the reconciliation logic work; anything that would write a todo currently
+> stops with exit code 3. See the [roadmap](ROADMAP.md).
+
+
+## How it works
+
+Each run is a short pipeline — collect, process, export — and then exits. There
+is no daemon except the optional web interface.
+
+```
+cron ─> run-job.sh ─> CLI ─> configuration
+                       │
+                       └──> application ─> collect ─> process ─> export
+                                                                    │
+                                                state.json <─> reconcile <─> Todoist
+
+systemd ─> web ─> ui/          (localhost only, and only when [web] enabled)
+            └──> api ─> application      (the buttons, into the same pipeline)
+```
+
+Todoist is not called on every run. Each run records which todo it created for
+which collection in `state.json`, and only picks up the phone when something no
+longer agrees:
+
+| What the run finds | What it does |
+| --- | --- |
+| The same collections as last time | Nothing at all — Todoist is not called |
+| A date added, moved or no longer collected | Asks Todoist what it holds, works out the difference, applies it |
+| `due_time`, `project` or `remind_days_before` changed | The same, and rewrites every todo that stays |
+| No state file, or one it cannot read | The same; a missing record is a reason to ask |
+| A previous run that stopped halfway | The same, and rewrites every todo that stays; what got through was recorded, but only Todoist can say what did not |
+
+The state file determines *whether* to ask. However, the update delta is always
+based on first-hand Todoist data. A to-do deleted by hand comes back, and stray
+duplicates are cleaned up. We never consider anything that happened before now.
+The state file is disposable and will automatically be rebuilt on subsequent
+runs.
+
+The schedule API publishes **dates only, never a time**, which is why
+`due_time` is a configuration key rather than something read from the source.
+
+
+## Installation
+
+The target is a **Debian 12 LXC container**. `install.sh` is used to configure that container.
+
+
+### Create the container
+
+The recommended LXC configuration is as follows.
+
+| Setting | Value | Why |
+| --- | --- | --- |
+| Template | `debian-12-standard` | What the installer targets; downloaded if absent |
+| Cores | 1 | One HTTP request a day |
+| Memory / Swap | 256 MiB each | A run peaks around 40 MB, the web interface holds about 30 |
+| Disk | 2 GiB | A finished install uses about 0.8 GB |
+| Privilege | unprivileged | Nothing the job does needs more |
+| Network | DHCP on `vmbr0` | Outbound HTTPS; the web interface stays on loopback |
+| Time zone | host | Due times come from `zoneinfo` regardless |
+| Autostart | on boot | So the schedule survives a host reboot |
+
+
+### Installation
+
+Inside the container, as root:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/tmemelink/garbage-collection-automation/main/install.sh | bash
+```
+
+Or from the Proxmox host, without entering the container:
+
+```sh
+pct exec <vmid> -- bash -c 'curl -fsSL https://raw.githubusercontent.com/tmemelink/garbage-collection-automation/main/install.sh | bash'
+```
+Pin a tag for reproducible installs: `... | bash -s -- --ref v0.1.0`.
+
+
+### Installer options
+
+The installer is idempotent — re-run it to upgrade. It never overwrites an
+existing config file or the env file holding the secrets.
+
+| Option | Effect |
+| --- | --- |
+| `--ref <git-ref>` | Install a specific branch, tag or commit (default `main`) |
+| `--source <path>` | Install from a local directory or tarball instead of downloading |
+| `--no-schedule` | Install without adding the cron entry |
+| `--no-web` | Install without the web interface service (and remove it if present) |
+| `--run-now` / `--no-run-now` | Answer the "run it once now?" question in advance |
+| `--uninstall` | Remove app, user and schedule; keeps config, state and logs |
+
+Set `GITHUB_TOKEN` if the repository is private. `APP_USER`, `INSTALL_DIR`,
+`CONFIG_DIR`, `STATE_DIR`, `LOG_DIR` and `HOME_CMD` can be overridden through
+the environment.
+
+### What it installs where
+
+| Path | Contents |
+| --- | --- |
+| `/opt/garbage-collection-automation` | Application and its virtualenv |
+| `/etc/garbage-collection-automation/config.toml` | Configuration — **edit this first** |
+| `/etc/garbage-collection-automation/env` | Secrets, `KEY=value` per line |
+| `/root/run-garbage-collection.sh` | The by-hand command |
+| `/etc/cron.d/garbage-collection-automation` | Schedule, 04:00 every Saturday by default |
+| `/etc/systemd/system/garbage-collection-automation-web.service` | The web interface |
+| `/var/lib/garbage-collection-automation/` | `state.json` and the run lock |
+| `/var/log/garbage-collection-automation/` | Job output, rotated weekly |
+
+
+## Configuration
+
+Configuration lives in `/etc/garbage-collection-automation/config.toml`; see
+[config/config.example.toml](config/config.example.toml) for the annotated
+template. Set your postcode and house number there before the first run.
+
+| Key | Default | Meaning |
+| --- | --- | --- |
+| `address.postcode` / `.house_number` / `.addition` | — | The address to look up |
+| `collection.api_key` | — | The key the schedule API expects; every run needs it |
+| `collection.lookahead_days` | `30` | How far ahead to build to-dos |
+| `collection.due_time` | `"07:00"` | Due moment on the collection day, Europe/Amsterdam |
+| `collection.types` | `["restafval", "papier", "gft"]` | `restafval`, `papier`, `gft`, `pmd`, `glas`, `textiel`, `kca`, `kerstbomen` |
+| `collection.timeout_seconds` / `.retries` | `15` / `1` | Limits on the single request per run |
+| `export.todoist.enabled` / `.token` / `.project` | `false` / — / `"Home"` | The Todoist target |
+| `export.todoist.remind_days_before` | `1` | How long before the collection the reminder goes off |
+| `web.enabled` | `false` | Whether the local page is served at all |
+| `web.host` / `.port` | `"127.0.0.1"` / `8080` | Loopback addresses and unprivileged ports only |
+| `logging.level` | `"INFO"` | `DEBUG` adds application detail; credential-bearing HTTP query strings remain suppressed |
+
+Unknown keys are rejected rather than ignored, so a typo fails the run with a
+message naming the key. Changing `due_time`, `project` or `remind_days_before`
+makes the next run rewrite every todo it already created.
+
+### Secrets
+
+Two installation-level values are not compiled into the code. Each may sit in
+`config.toml`, and each has an environment variable that wins over the file:
+
+| Configuration key | Environment variable | Where to get it |
+| --- | --- | --- |
+| `collection.api_key` | `GCA_AFVALWIJZER_API_KEY` | Open mijnafvalwijzer.nl with the browser's network tab, look up any address, copy the `apikey` query parameter |
+| `export.todoist.token` | `GCA_TODOIST_TOKEN` | Todoist › Settings › Integrations › Developer |
+
+A cron job inherits nothing from anyone's shell, so `run-job.sh` sources an env
+file before every run — that file is how either variable reaches a scheduled
+run, and the web interface's unit reads the same one:
+
+```sh
+# /etc/garbage-collection-automation/env   (root:gca, mode 0640)
+GCA_AFVALWIJZER_API_KEY=the-app-key
+GCA_TODOIST_TOKEN=your-token-here
+```
+
+The installer writes that file with both keys commented out and never touches it
+again on upgrade. From a checkout the same file is `config/env` (gitignored);
+`ENV_FILE` overrides the path in either layout.
+
+The API key is a fixed key the public afvalwijzer clients all send — not
+per-user, but not ours to hardcode either. A run without one stops with exit
+code 4.
+
+## Usage
+
+The job runs on its own from cron. To run it by hand, use the command the
+installer leaves in root's home:
+
+```sh
+~/run-garbage-collection.sh              # run as the gca user, output on your terminal
+~/run-garbage-collection.sh --dry-run    # collect and process, write nothing
+
+tail -f /var/log/garbage-collection-automation/cron.log
+
+cat /var/lib/garbage-collection-automation/state.json   # private address/task metadata
+rm  /var/lib/garbage-collection-automation/state.json   # forget it; next run re-checks Todoist
+```
+
+To change the schedule, edit `/etc/cron.d/garbage-collection-automation`.
+Reinstalling rewrites that file from `scheduling/*.cron`, so persistent changes
+belong in the repository template.
+
+### Web interface
+
+A single local page showing what the last run found, the delta it would apply,
+and the configuration. It is off until asked for — in `config.toml`:
+
+```toml
+[web]
+enabled = true
+port = 8080
+```
+
+```sh
+systemctl restart garbage-collection-automation-web
+journalctl -u garbage-collection-automation-web -f    # the access log lives here
+```
+
+The server binds **the loopback interface only**, and the configuration accepts
+nothing else: the page has no login and shows both secrets. Reach it over an ssh
+tunnel, which authenticates the person the page cannot:
+
+```sh
+ssh -N -L 8080:127.0.0.1:8080 root@<container>                       # direct
+ssh -N -J root@<proxmox-host> -L 8080:127.0.0.1:8080 root@<container> # via Proxmox
+```
+
+Then open <http://127.0.0.1:8080/>. `curl http://127.0.0.1:8080/healthz` is the
+quickest way to tell a broken tunnel from a stopped server.
+
+The buttons run the same pipeline the weekly job runs, and differ only in how
+far they are allowed to get:
+
+| Button | Endpoint | Reads | Writes |
+| --- | --- | --- | --- |
+| *Collect now* | `POST /api/collect` | mijnafvalwijzer.nl | nothing — a dry run |
+| *Check Todoist* | `POST /api/check` | also Todoist | nothing |
+| *Apply delta* | `POST /api/apply` | also Todoist | the to-dos, and `state.json` |
+| *Save configuration* | `POST /api/config` | the form | `config.toml` |
+
+`GET /api/state` returns the configuration, the last run and the cron line
+without touching the network — it is what the page draws itself from.
+
+All four actions take the same lock the cron job takes; a lock they cannot have
+is answered **409 immediately, never a wait**. The schedule is shown but never
+written — change it over ssh. *Check Todoist* and *Apply delta* currently reach
+the unfinished Todoist client and say so.
+
+### Exit codes
+
+`run-job.sh` passes the CLI's codes straight through. `0`–`5` belong to the job,
+`6` to the web interface.
+
+| Code | Meaning |
+| --- | --- |
+| `0` | Run completed — also what the wrapper reports when it skipped an overlapping run |
+| `1` | The wrapper could not start the run — no readable config, or nothing installed |
+| `2` | The configuration is missing or invalid — the log says which key |
+| `3` | The run reached a pipeline step that is still a stub |
+| `4` | The schedule could not be collected — source unreachable, or unknown address |
+| `5` | The export could not be recorded — to-dos may exist while `state.json` does not say so |
+| `6` | The web interface could not start — port taken, or `ui/` not where it should be |
+
+## Development
+
+The whole pipeline runs from a checkout, touching **only** the repository: it
+reads `config/config.toml`, uses the `.venv/` next to it, keeps its lock and
+state in `.local/`, and writes nothing to `/etc`, `/opt`, `/var` or cron.
+
+```sh
+uv sync                                     # create .venv (Python 3.14 via uv)
+uv run pre-commit install                   # the checks below, on every commit
+cp config/config.example.toml config/config.toml
+$EDITOR config/config.toml                  # your address
+
+echo 'GCA_AFVALWIJZER_API_KEY=...' > config/env
+echo 'GCA_TODOIST_TOKEN=...' >> config/env  # only if you enable the export
+
+./src/run-job.sh --dry-run                  # same wrapper cron runs
+```
+
+`src/run-job.sh` picks its layout from where it sits. To skip it and call the
+CLI directly, pass `--state` yourself:
+
+```sh
+uv run garbage-collection-automation --config config/config.toml --state .local/state.json --dry-run
+uv run garbage-collection-automation-web --config config/config.toml   # needs [web] enabled = true
+```
+
+`./build.sh --list` shows the build targets (`lxc` today, `docker` planned).
+`config/config.toml`, `config/env` and `.local/` are gitignored and never end up
+in a bundle.
+
+### Tests
+
+```sh
+uv run pytest
+uv run pytest --cov --cov-report=term-missing
+```
+
+No test touches the network: captured mijnafvalwijzer.nl responses in
+`tests/fixtures/` are replayed through `httpx.MockTransport`, and Todoist is an
+in-memory stand-in. The suite also covers the shell — the wrapper's two layouts,
+the installer's file handling, and the contents of the bundle `./build.sh lxc`
+produces.
+
+### Pre-commit hooks
+
+What runs before a commit is written lives in
+[.pre-commit-config.yaml](.pre-commit-config.yaml), with the Python rules in the
+`[tool.ruff]` section of `pyproject.toml`. Install it once per checkout — the
+line above in the setup block — after which it is automatic:
+
+```sh
+uv run pre-commit install          # once; writes .git/hooks/pre-commit
+uv run pre-commit run --all-files  # everything now, without committing
+uv run pre-commit autoupdate       # move the pinned hook versions forward
+```
+
+Ten things are checked, roughly in the order they can save you time:
+
+| Check | What it stops |
+| --- | --- |
+| `ruff check --fix` | Undefined names, unused imports, import order, comprehensions written the long way, syntax older than the 3.14 this targets, and bandit's security rules |
+| `ruff format` | Arguments about layout. The width is 100 — what this repository already writes, rather than ruff's default 88 |
+| `uv-lock` | A `pyproject.toml` edit without the `uv.lock` to match; an install resolves against the lock, so the container would build something the tests never ran |
+| `shellcheck` | Unquoted variables and typo'd tests in a thousand lines of bash — one file of which is piped into a root shell over the network |
+| `detect-secrets`, `detect-private-key` | An API key, a Todoist token or a private key pasted into a config example, a test or a captured fixture |
+| `check-toml` / `-json` / `-yaml` | A syntax error in config the application parses at startup, or in a fixture the tests replay: a failed run at 04:00 rather than a failed test |
+| `check-added-large-files` | Build output, a virtualenv, a coverage database — anything over 1.5 MB. `dist/` is gitignored, but `git add -f` is one keystroke away |
+| shebang / executable bit | A script that cron, systemd or the installer invokes by path, committed without its executable bit — a job that silently never runs |
+| merge conflict / case conflict | Markers left in a file, and names that collide only on someone else's filesystem |
+| whitespace / EOF / line endings | Trailing whitespace and missing final newlines, which turn a one-line diff into a page of them, and CRLF in files shipped to a Debian container |
+
+The hooks only ever see **staged** files, so `config/config.toml` and
+`config/env` — the two gitignored files that hold the real secrets — are never
+scanned or rewritten. The ones that fix rather than report (both ruff hooks, the
+whitespace ones) stop the commit after editing, so you can read what changed and
+stage it; committing again then goes through.
+
+`detect-secrets` compares against [.secrets.baseline](.secrets.baseline), which
+holds the hashes of the placeholder tokens the tests use. It stops a commit for
+two different reasons, and they want different things from you.
+
+*The baseline file was updated* is bookkeeping. A placeholder moved lines, so the
+hook rewrote the baseline and stopped rather than commit a stale one. Read the
+diff — it should touch nothing but `line_number` and `generated_at` — then stage
+it and commit again:
+
+```sh
+git add .secrets.baseline
+```
+
+*Potential secrets about to be committed* is a decision, and here the baseline is
+left alone. If the finding is real, take it out of the file. If it is a fixture
+or an example, the inline pragma is the cheaper fix — it keeps the reason next to
+the line it excuses, and leaves the baseline untouched:
+
+```python
+TOKEN = "not-a-real-token"  # pragma: allowlist secret
+```
+
+Regenerating the baseline is the heavier option, and the obvious command is the
+wrong one. A bare `detect-secrets scan` walks only what git already tracks, so on
+a checkout whose files are still untracked it finds nothing and writes an empty
+baseline — after which every placeholder in the tests reads as a new secret.
+Naming files narrows it the same way: the results block is replaced, not merged.
+So scan everything, and repeat the exclusions, which live in the baseline and are
+therefore only as good as the last command that wrote it. Without them the
+gitignored files that hold the real secrets get hashed into a file you are about
+to commit:
+
+```sh
+uv run detect-secrets scan --all-files --baseline .secrets.baseline \
+  --exclude-files '^\.venv/' --exclude-files '^\.git/' --exclude-files '^dist/' \
+  --exclude-files '^\.local/' --exclude-files '^\.pytest_cache/' \
+  --exclude-files '^\.ruff_cache/' --exclude-files '^\.env$' \
+  --exclude-files '^config/config\.toml$' --exclude-files '^config/env$' \
+  --exclude-files '^uv\.lock$'   # then read the diff before staging it
+```
+
+## Security
+
+Please report vulnerabilities privately; see [SECURITY.md](SECURITY.md). Never
+put a live token, API key, address or other private data in a public issue.
+
+
+## License
+
+[Apache 2.0](LICENSE)

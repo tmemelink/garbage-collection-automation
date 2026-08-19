@@ -1,0 +1,304 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Garbage Collection Automation</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><text y='14' font-size='14'>&#128465;</text></svg>">
+<link rel="stylesheet" href="static/app.css">
+</head>
+<body>
+
+<!--
+  One page, three regions: what the last run found (summary + tables), what the
+  next run will use (the configuration form), and what it said while running
+  (the console).
+
+  There is no sample data here any more and no template engine either: the page
+  is a shell, and app.js fills every marked region from the endpoints in
+  src/garbage_collection_automation/api.py. The <template> elements at the end
+  are the shapes it clones, so every class the stylesheet knows about is written
+  once, here, and not in a javascript string.
+-->
+
+<header class="topbar">
+  <svg class="topbar__mark" viewBox="0 0 24 24" aria-hidden="true">
+    <path d="M4 7h16M9 7V5a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2M6 7l1 12a2 2 0 0 0 2 2h6a2 2 0 0 0 2-2l1-12M10 11v6M14 11v6"/>
+  </svg>
+  <h1 class="topbar__title">Garbage Collection Automation</h1>
+  <span class="chip" id="address" hidden></span>
+  <span class="badge" id="status" hidden></span>
+  <p class="topbar__meta" id="last-run"></p>
+</header>
+
+<main class="layout">
+
+  <!-- Summary: the headline of the last run, and the buttons that start a new one. -->
+  <section class="panel summary">
+    <div class="summary__text">
+      <h2 class="summary__headline" id="headline">Loading&hellip;</h2>
+      <p class="summary__reason" id="reason"></p>
+    </div>
+    <div class="summary__actions">
+      <button type="button" class="button" id="collect"
+              title="Fetch the schedule. Writes nothing, and does not touch Todoist.">
+        Collect now
+      </button>
+      <button type="button" class="button button--blue" id="check"
+              title="Also ask Todoist what it holds, and show the difference. Writes nothing.">
+        Check Todoist
+      </button>
+      <button type="button" class="button button--green" id="apply"
+              title="The real run: write the to-dos and record them.">
+        Apply delta
+      </button>
+    </div>
+  </section>
+
+  <div class="workspace">
+
+    <div class="workspace__main">
+
+      <!-- The upcoming collections, one row per Collection. -->
+      <section class="panel panel--flush">
+        <div class="table-scroll">
+          <table class="table">
+            <thead>
+              <tr>
+                <th scope="col">Date</th>
+                <th scope="col">Weekday</th>
+                <th scope="col">Type</th>
+                <th scope="col">Due</th>
+                <th scope="col">Reminder</th>
+                <th scope="col">Status</th>
+                <th scope="col">ID</th>
+              </tr>
+            </thead>
+            <tbody id="rows"></tbody>
+          </table>
+        </div>
+        <p class="empty" id="rows-empty">Nothing collected yet &ndash; press <b>Collect now</b>.</p>
+      </section>
+
+      <!-- The delta, in the three parts reconciliation.Delta has. -->
+      <section class="delta" id="delta" hidden>
+
+        <article class="panel delta__card delta__card--add">
+          <h3 class="delta__title">Add</h3>
+          <p class="delta__count" data-count="create">0</p>
+          <ul class="delta__list" data-list="create"></ul>
+          <p class="delta__empty" data-empty="create">No items to add</p>
+        </article>
+
+        <article class="panel delta__card delta__card--rewrite">
+          <h3 class="delta__title">Rewrite</h3>
+          <p class="delta__count" data-count="update">0</p>
+          <ul class="delta__list" data-list="update"></ul>
+          <p class="delta__empty" data-empty="update">No items to rewrite</p>
+        </article>
+
+        <article class="panel delta__card delta__card--remove">
+          <h3 class="delta__title">Remove</h3>
+          <p class="delta__count" data-count="delete">0</p>
+          <ul class="delta__list" data-list="delete"></ul>
+          <p class="delta__empty" data-empty="delete">No items to remove</p>
+        </article>
+
+      </section>
+
+    </div>
+
+    <!-- The configuration, in the order config.toml has it. -->
+    <aside class="workspace__side">
+
+      <form class="panel config" id="config" novalidate>
+
+        <fieldset class="config__group">
+          <legend class="config__legend">Location</legend>
+          <div class="field-row">
+            <p class="field">
+              <label class="field__label" for="postcode">Postcode</label>
+              <input class="input" id="postcode" name="postcode" value=""
+                     inputmode="text" autocomplete="postal-code" pattern="[1-9][0-9]{3}\s*[A-Za-z]{2}">
+            </p>
+            <p class="field">
+              <label class="field__label" for="house_number">House number</label>
+              <input class="input" id="house_number" name="house_number" value="" inputmode="numeric">
+            </p>
+          </div>
+          <p class="field">
+            <label class="field__label" for="addition">Addition</label>
+            <input class="input" id="addition" name="addition" value=""
+                   placeholder="the letter or suffix, if any">
+          </p>
+        </fieldset>
+
+        <fieldset class="config__group">
+          <legend class="config__legend">Data source</legend>
+
+          <p class="field">
+            <label class="field__label" for="api_key">mijnafvalwijzer API key</label>
+            <span class="input-with-button">
+              <input class="input" id="api_key" name="api_key" type="password"
+                     value="" autocomplete="off" spellcheck="false">
+              <button type="button" class="icon-button" data-reveal="api_key"
+                      aria-controls="api_key" aria-pressed="false" aria-label="Show API key">
+                <svg viewBox="0 0 24 24" aria-hidden="true">
+                  <path d="M2 12s3.6-6 10-6 10 6 10 6-3.6 6-10 6-10-6-10-6Z"/>
+                  <circle cx="12" cy="12" r="2.6"/>
+                </svg>
+              </button>
+            </span>
+            <span class="field__hint">
+              The fixed key every afvalwijzer client sends; without it the schedule
+              cannot be fetched at all. The README says where to read it off.
+            </span>
+            <span class="field__hint" id="api_key_hint" hidden>
+              GCA_AFVALWIJZER_API_KEY is set in the environment and wins over this
+              file, so the key is shown but not saved from here.
+            </span>
+          </p>
+        </fieldset>
+
+        <fieldset class="config__group">
+          <legend class="config__legend">Defaults</legend>
+          <div class="field-row">
+            <p class="field">
+              <label class="field__label" for="lookahead_days">Look ahead (days)</label>
+              <input class="input" id="lookahead_days" name="lookahead_days" type="number" min="1" max="365" value="30">
+            </p>
+            <p class="field">
+              <label class="field__label" for="due_time">Due time</label>
+              <input class="input" id="due_time" name="due_time" type="time" value="07:00">
+            </p>
+          </div>
+        </fieldset>
+
+        <fieldset class="config__group">
+          <legend class="config__legend">Waste types</legend>
+          <!-- One switch per code in configuration.WASTE_TYPES; app.js clones them. -->
+          <div class="types" id="types"></div>
+        </fieldset>
+
+        <fieldset class="config__group">
+          <legend class="config__legend">Todoist</legend>
+
+          <label class="switch switch--inline">
+            <span class="switch__label">Export to Todoist</span>
+            <input type="checkbox" id="todoist_enabled" name="todoist_enabled">
+            <span class="switch__track" aria-hidden="true"></span>
+          </label>
+
+          <p class="field">
+            <label class="field__label" for="todoist_token">API token</label>
+            <span class="input-with-button">
+              <input class="input" id="todoist_token" name="todoist_token" type="password"
+                     value="" autocomplete="off" spellcheck="false">
+              <button type="button" class="icon-button" data-reveal="todoist_token"
+                      aria-controls="todoist_token" aria-pressed="false" aria-label="Show token">
+                <svg viewBox="0 0 24 24" aria-hidden="true">
+                  <path d="M2 12s3.6-6 10-6 10 6 10 6-3.6 6-10 6-10-6-10-6Z"/>
+                  <circle cx="12" cy="12" r="2.6"/>
+                </svg>
+              </button>
+            </span>
+            <span class="field__hint" id="token_hint" hidden>
+              GCA_TODOIST_TOKEN is set in the environment and wins over this file,
+              so the token is shown but not saved from here.
+            </span>
+          </p>
+
+          <div class="field-row">
+            <p class="field">
+              <label class="field__label" for="todoist_project">Project</label>
+              <input class="input" id="todoist_project" name="todoist_project" value="">
+            </p>
+            <p class="field">
+              <label class="field__label" for="remind_days_before">Remind (days before)</label>
+              <input class="input" id="remind_days_before" name="remind_days_before"
+                     type="number" min="0" max="30" value="1">
+            </p>
+          </div>
+        </fieldset>
+
+        <p class="field">
+          <label class="field__label" for="cron">Schedule (cron)</label>
+          <input class="input input--mono" id="cron" value="" spellcheck="false" readonly disabled>
+          <span class="field__hint" id="cron_hint"></span>
+        </p>
+
+        <p class="notice" id="config_error" hidden></p>
+        <button type="submit" class="button button--blue button--filled button--block" id="save">
+          Save configuration
+        </button>
+      </form>
+
+      <section class="panel file">
+        <svg class="file__icon" viewBox="0 0 24 24" aria-hidden="true">
+          <path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8l-5-5Z"/>
+          <path d="M14 3v5h5M9 13h6M9 17h6"/>
+        </svg>
+        <p class="file__field">
+          <span class="file__label">Config file</span>
+          <span class="file__value file__value--mono" id="config_path"></span>
+        </p>
+        <p class="file__field file__field--end">
+          <span class="file__label">Last export</span>
+          <span class="file__value" id="state_updated">never</span>
+        </p>
+      </section>
+
+    </aside>
+
+  </div>
+
+  <!-- The log of the last run; <details> so it collapses without any script. -->
+  <details class="panel console" open>
+    <summary class="console__header">
+      <svg class="console__icon" viewBox="0 0 24 24" aria-hidden="true">
+        <rect x="3" y="4" width="18" height="16" rx="2"/>
+        <path d="m7 9 3 3-3 3M13 15h4"/>
+      </svg>
+      <span class="console__title">Console</span>
+      <svg class="console__chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="m6 15 6-6 6 6"/></svg>
+    </summary>
+    <div class="console__body">
+      <pre class="console__log" id="console"></pre>
+    </div>
+  </details>
+
+</main>
+
+<!-- The shapes app.js clones. Kept here so the markup lives with the markup. -->
+
+<template id="row-template">
+  <tr>
+    <td class="cell-date"></td>
+    <td class="cell-muted" data-field="weekday"></td>
+    <td><span class="waste"></span></td>
+    <td class="cell-muted" data-field="due"></td>
+    <td class="cell-muted" data-field="remind"></td>
+    <td><span class="status"></span></td>
+    <td class="cell-id"></td>
+  </tr>
+</template>
+
+<template id="delta-item-template">
+  <li><span class="delta__date"></span> <span class="waste waste--bare"></span></li>
+</template>
+
+<template id="type-template">
+  <label class="switch switch--pill">
+    <input type="checkbox" name="types" value="">
+    <span class="switch__track" aria-hidden="true"></span>
+    <span class="switch__label"></span>
+  </label>
+</template>
+
+<template id="log-template">
+  <span class="log-line"><span class="log-time"></span> <span class="log-level"></span>  <span class="log-message"></span></span>
+</template>
+
+<script src="static/app.js"></script>
+</body>
+</html>
