@@ -541,6 +541,6 @@ main() {
 
 # Sourcing this file defines the steps without running them, which is how the
 # test suite exercises them one at a time.
-if [ "${BASH_SOURCE[0]}" = "$0" ]; then
+if [ "${BASH_SOURCE[0]:-$0}" = "$0" ]; then
     main "$@"
 fi
