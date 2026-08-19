@@ -240,6 +240,67 @@ def test_the_only_reminder_a_todo_gets_is_the_configured_one():
     assert reminder == {"task_id": "42", "reminder_type": "relative", "minute_offset": 2 * 1440}
 
 
+def test_a_todo_is_still_written_when_the_account_may_not_have_reminders(caplog):
+    """Custom reminders are a Todoist Pro feature; a free account answers 403 to every one.
+
+    Losing the whole export over that would leave every run half done, and the
+    todo - due moment and all - is the point of this project.
+    """
+    api = Api(
+        {
+            "POST tasks": reply({"id": "42"}),
+            "POST reminders": reply({"error": "Feature not available"}, status=403),
+        }
+    )
+
+    with caplog.at_level("WARNING"):
+        assert api.client().create_task(RESTAFVAL) == "42"
+
+    assert "Todoist Pro" in caplog.text
+
+
+def test_a_refused_reminder_is_asked_for_once_and_then_left_alone(caplog):
+    api = Api(
+        {
+            "POST tasks": [reply({"id": "42"}), reply({"id": "43"})],
+            "POST reminders": reply({"error": "Feature not available"}, status=403),
+        }
+    )
+    client = api.client()
+
+    with caplog.at_level("WARNING"):
+        client.create_task(RESTAFVAL)
+        client.create_task(GFT)
+
+    assert len(api.calls("POST reminders")) == 1, "the second todo knows better than to ask"
+    assert caplog.text.count("Todoist Pro") == 1, "said once, not once per todo"
+
+
+def test_a_rewrite_leaves_the_reminder_alone_when_the_account_may_not_have_one(caplog):
+    """The same refusal, met while reading rather than writing."""
+    api = Api(
+        {
+            "GET tasks": page(task("42", RESTAFVAL)),
+            "POST tasks/42": reply({"id": "42"}),
+            "GET reminders": reply({"error": "Feature not available"}, status=403),
+        }
+    )
+
+    with caplog.at_level("WARNING"):
+        api.client().update_task("42", RESTAFVAL)
+
+    assert api.calls("POST reminders") == [], "asking again would only be refused again"
+    assert "Todoist Pro" in caplog.text
+
+
+def test_a_reminder_refused_for_any_other_reason_still_fails_the_run():
+    """Only a refusal is the account's plan; a 500 is Todoist having a moment."""
+    api = Api({"POST tasks": reply({"id": "42"}), "POST reminders": reply({}, status=500)})
+
+    with pytest.raises(TodoistError, match="HTTP 500 on POST /reminders"):
+        api.client().create_task(RESTAFVAL)
+
+
 def test_a_creation_that_does_not_say_which_todo_it_made_is_refused():
     """An id we never learned is a todo the record cannot name; better to fail loudly."""
     api = Api({"POST tasks": reply({"ok": True})})
@@ -424,7 +485,7 @@ def test_a_delete_that_fails_for_any_other_reason_still_fails():
     """Only "it is already gone" is the wanted end; a refusal is not."""
     api = Api({"DELETE tasks/42": reply({"error": "nope"}, status=403)})
 
-    with pytest.raises(TodoistError, match="refused the token"):
+    with pytest.raises(TodoistError, match="would not do DELETE /tasks/42"):
         api.client().delete_task("42")
 
 
@@ -435,6 +496,36 @@ def test_a_refused_token_says_where_to_put_the_right_one():
         api.client().list_tasks()
 
     assert raised.value.status == 401
+
+
+def test_a_refusal_names_the_call_and_does_not_blame_the_token():
+    """403 is not 401: the token got this far, so sending someone to it wastes their evening."""
+    api = Api({"POST tasks": reply({"error": "Feature not available"}, status=403)})
+
+    with pytest.raises(TodoistError) as raised:
+        api.client().create_task(RESTAFVAL)
+
+    assert "POST /tasks" in str(raised.value)
+    assert "Feature not available" in str(raised.value), "what todoist said beats what we guess"
+    assert "read-only" in str(raised.value)
+    assert raised.value.status == 403
+
+
+def test_what_todoist_said_survives_a_refused_token_too():
+    api = Api({"GET tasks": reply({"error": "token expired"}, status=401)})
+
+    with pytest.raises(TodoistError, match="token expired"):
+        api.client().list_tasks()
+
+
+def test_an_unreachable_api_says_which_call_never_got_there():
+    def refuse(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("no route to host")
+
+    client = Todoist(config(), client=httpx.Client(transport=httpx.MockTransport(refuse)))
+
+    with pytest.raises(TodoistError, match=r"for GET /tasks"):
+        client.list_tasks()
 
 
 def test_a_reading_call_is_tried_again():
@@ -520,7 +611,9 @@ def test_a_failure_is_reported_in_one_readable_line():
     """A cron log is read at a glance; a wall of HTML in it is no use to anyone."""
     api = Api({"GET tasks": httpx.Response(500, text="<html>\n  <body>oh dear</body>\n</html>")})
 
-    with pytest.raises(TodoistError, match=r"todoist returned HTTP 500: <html> <body>oh dear"):
+    with pytest.raises(
+        TodoistError, match=r"todoist returned HTTP 500 on GET /tasks: <html> <body>oh dear"
+    ):
         api.client().list_tasks()
 
 

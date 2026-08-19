@@ -22,6 +22,7 @@ is not ours to do.
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import re
 import time
@@ -111,6 +112,9 @@ class Todoist:
         self._client = client if client is not None else httpx.Client()
         self._owns_client = client is None
         self._project_id: str | None = None
+        #: Whether reminders are worth asking for at all. Turned off for the rest
+        #: of the run the first time Todoist refuses one; see _reminders_or_not().
+        self._reminders = True
         #: Which project each listed todo is in, so an update knows whether to
         #: move it. Only ever what this client saw itself.
         self._project_of: dict[str, str] = {}
@@ -198,14 +202,17 @@ class Todoist:
         It is relative to the due moment rather than a date of its own, so a
         collection that moves takes its reminder along without being asked.
         """
-        self._post(
-            "reminders",
-            {
-                "task_id": task_id,
-                "reminder_type": "relative",
-                "minute_offset": self._reminder_offset,
-            },
-        )
+        if not self._reminders:
+            return
+        with self._reminders_or_not():
+            self._post(
+                "reminders",
+                {
+                    "task_id": task_id,
+                    "reminder_type": "relative",
+                    "minute_offset": self._reminder_offset,
+                },
+            )
 
     def _fix_reminder(self, task_id: str) -> None:
         """Make an existing todo's reminder agree with ``remind_days_before``.
@@ -213,17 +220,45 @@ class Todoist:
         Only the first relative reminder is ours to touch; anything else on the
         todo was put there by a person, and a rewrite is not a reason to lose it.
         """
-        for item in self._pages("reminders", {"task_id": task_id}):
-            if item.get("type") != "relative":
-                continue
-            reminder_id = str(item.get("id") or "")
-            if not reminder_id:
-                continue
-            if item.get("minute_offset") == self._reminder_offset:
-                return
-            self._post(f"reminders/{reminder_id}", {"minute_offset": self._reminder_offset})
+        if not self._reminders:
             return
+        with self._reminders_or_not():
+            for item in self._pages("reminders", {"task_id": task_id}):
+                if item.get("type") != "relative":
+                    continue
+                reminder_id = str(item.get("id") or "")
+                if not reminder_id:
+                    continue
+                if item.get("minute_offset") == self._reminder_offset:
+                    return
+                self._post(f"reminders/{reminder_id}", {"minute_offset": self._reminder_offset})
+                return
         self._add_reminder(task_id)
+
+    @contextlib.contextmanager
+    def _reminders_or_not(self) -> Iterator[None]:
+        """Let a reminder call fail the run for any reason except a refusal.
+
+        Custom reminders are a Todoist Pro feature, and an account without it
+        answers 403 to every one of them. That is Todoist saying what this
+        account may have, not this run going wrong: the todo itself is written,
+        due moment and all, and only the reminder on it is missing. So say it
+        once, and stop asking for the rest of the run.
+        """
+        try:
+            yield
+        except TodoistError as exc:
+            if exc.status != httpx.codes.FORBIDDEN:
+                raise
+            self._reminders = False
+            log.warning(
+                "todoist refused a reminder (HTTP 403) and none will be asked for again "
+                "this run; custom reminders need Todoist Pro, and an API token that may "
+                "write. The to-dos themselves are written as usual, each due at %s on the "
+                "collection day - only the reminder %d day(s) beforehand is missing",
+                self._due_time.isoformat("minutes"),
+                self._reminder_offset // _MINUTES_PER_DAY,
+            )
 
     def _move(self, task_id: str) -> None:
         """Put a todo back in the configured project, if it is not there already.
@@ -308,6 +343,10 @@ class Todoist:
             "X-Request-Id": str(uuid.uuid4()),
         }
         url = f"{API_URL}/{path}"
+        # What the message says went wrong. A cron log is read hours later by
+        # someone who has only these words to go on, and "todoist said no" is
+        # a different problem depending on which call it said it to.
+        call = f"{method} /{path}"
         repeatable = method in ("GET", "DELETE")
 
         for attempt in range(1, _ATTEMPTS + 1):
@@ -322,13 +361,13 @@ class Todoist:
                     timeout=_TIMEOUT_SECONDS,
                 )
             except httpx.HTTPError as exc:
-                problem = f"could not reach {httpx.URL(url).host} ({type(exc).__name__})"
+                problem = f"could not reach {httpx.URL(url).host} for {call} ({type(exc).__name__})"
                 if not repeatable or attempt == _ATTEMPTS:
                     raise TodoistError(problem) from exc
             else:
                 if response.is_success:
                     return response
-                problem = _problem(response)
+                problem = _problem(response, call)
                 status = response.status_code
                 worth_repeating = status in _RETRY_STATUSES and (
                     repeatable or status == httpx.codes.TOO_MANY_REQUESTS
@@ -407,15 +446,31 @@ def _json(response: httpx.Response) -> dict:
     return payload
 
 
-def _problem(response: httpx.Response) -> str:
-    """What went wrong, in a sentence fit for a cron log."""
-    if response.status_code in (httpx.codes.UNAUTHORIZED, httpx.codes.FORBIDDEN):
-        return (
-            f"todoist refused the token (HTTP {response.status_code}); "
-            f"check {TOKEN_ENV_VAR} or [export.todoist] token"
-        )
+def _problem(response: httpx.Response, call: str) -> str:
+    """What went wrong, in a sentence fit for a cron log.
+
+    Todoist explains itself in the body, and whatever it said is worth more than
+    anything guessed here, so it is always passed on. The two refusals are kept
+    apart because they send the reader to opposite ends of the problem: 401 is
+    the token, and 403 is everything the token is not allowed to do.
+    """
     detail = " ".join(response.text.split())[:200]
-    return f"todoist returned HTTP {response.status_code}" + (f": {detail}" if detail else "")
+    said = f": {detail}" if detail else ""
+    if response.status_code == httpx.codes.UNAUTHORIZED:
+        return (
+            f"todoist rejected the token on {call} (HTTP 401); "
+            f"check {TOKEN_ENV_VAR} or [export.todoist] token{said}"
+        )
+    if response.status_code == httpx.codes.FORBIDDEN:
+        # Not the token itself: it got this far. Either it may not write - an
+        # OAuth token without data:read_write - or the account's plan does not
+        # include what was asked for, which is what a reminder runs into.
+        return (
+            f"todoist took the token but would not do {call} (HTTP 403); "
+            f"the token may be read-only, or the account's plan does not "
+            f"include this{said}"
+        )
+    return f"todoist returned HTTP {response.status_code} on {call}{said}"
 
 
 def _retry_after(response: httpx.Response, fallback: float) -> float:

@@ -68,6 +68,11 @@ and it is still recognised, delete the marker and the todo is left alone from
 then on, untouched and unmanaged. Everything else — the content, the reminder
 you add yourself, the labels you add yourself — is yours.
 
+Custom reminders are a Todoist Pro feature. On an account without it Todoist
+answers `403` to every reminder, so a run says so once, writes its to-dos with
+their due moment as usual and leaves the reminders out; nothing else about the
+run changes.
+
 A todo you tick off is done as far as Todoist is concerned, so a run that has to
 ask about a collection day that has not passed yet will write it again. Runs
 that find the schedule unchanged never ask, which is why this is rare.
@@ -191,7 +196,7 @@ writes them in; everything else is edited there afterwards.
 | `collection.types` | `["restafval", "papier", "gft"]` | `restafval`, `papier`, `gft`, `pmd`, `glas`, `textiel`, `kca`, `kerstbomen` |
 | `collection.timeout_seconds` / `.retries` | `15` / `1` | Limits on the single request per run |
 | `export.todoist.enabled` / `.token` / `.project` | `true` / — / `"Home"` | The Todoist target; on unless the file says otherwise, and skipped with a log line when no token is configured |
-| `export.todoist.remind_days_before` | `1` | How long before the collection the reminder goes off; `0` is the due moment itself |
+| `export.todoist.remind_days_before` | `1` | How long before the collection the reminder goes off; `0` is the due moment itself. Reminders need Todoist Pro; without it they are skipped with a warning |
 | `web.enabled` | `false` | Whether the local page is served at all |
 | `web.host` / `.port` | `"127.0.0.1"` / `8080` | Loopback addresses and unprivileged ports only |
 | `logging.level` | `"INFO"` | `DEBUG` adds application detail; credential-bearing HTTP query strings remain suppressed |
@@ -302,7 +307,7 @@ written — change it over ssh.
 | `0` | Run completed — also what the wrapper reports when it skipped an overlapping run |
 | `1` | The wrapper could not start the run — no readable config, or nothing installed |
 | `2` | The configuration is missing or invalid — the log says which key |
-| `3` | Todoist could not be reached, or refused — a token, a project that is not there, their API having a moment |
+| `3` | Todoist could not be reached, or refused — a token, a project that is not there, their API having a moment. The message names the call it failed on, and repeats what Todoist said about it |
 | `4` | The schedule could not be collected — source unreachable, or unknown address |
 | `5` | The export could not be recorded — to-dos may exist while `state.json` does not say so |
 | `6` | The web interface could not start — port taken, or `ui/` not where it should be |
