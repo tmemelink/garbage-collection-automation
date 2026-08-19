@@ -8,8 +8,8 @@ and execute it. Then write down what is now there.
 
 The run is described by what it returns, not by what it raises. Everything that
 goes wrong in the ordinary course of a scheduled job - an unreachable source, an
-address the source does not know, a state file that cannot be written - comes
-back as a :class:`Status` on a :class:`JobResult`. The CLI turns that into an
+address the source does not know, a Todoist that refuses, a state file that
+cannot be written - comes back as a :class:`Status` on a :class:`JobResult`. The CLI turns that into an
 exit code; anything else that wants to run the job (a web page, a test) gets the
 same object and decides for itself what to do with it.
 """
@@ -22,11 +22,12 @@ from datetime import date
 from enum import StrEnum
 from pathlib import Path
 
-from . import data_collection, data_export, data_processing, reconciliation, state
+from . import data_collection, data_export, data_processing, state
 from .configuration import Config
 from .data_collection import RawSchedule
 from .data_processing import Collection
 from .reconciliation import Decision, Delta, TodoistClient
+from .todoist import TodoistError
 
 log = logging.getLogger(__name__)
 
@@ -37,10 +38,11 @@ class Status(StrEnum):
     OK = "ok"
     #: The schedule could not be fetched, or the source does not know the address.
     COLLECTION_ERROR = "collection-error"
+    #: Todoist could not be reached, or refused what was asked of it. Whatever
+    #: the run got through before that is written; the rest is not.
+    TODOIST_ERROR = "todoist-error"
     #: The to-dos may exist while the local record of them does not.
     EXPORT_ERROR = "export-error"
-    #: A step of the pipeline that is still a stub.
-    NOT_IMPLEMENTED = "not-implemented"
 
 
 @dataclass(frozen=True)
@@ -116,11 +118,13 @@ def run(
             client=client,
             today=day,
         )
+    except TodoistError as exc:
+        # Their end, not ours: an unreachable API, a refused token, a project
+        # that is not there. reconcile() has recorded whatever did get through.
+        return JobResult(Status.TODOIST_ERROR, f"todoist: {exc}", found, schedule)
     except state.StateError as exc:
         # The to-dos may well have been written; only the record of them was not.
         return JobResult(Status.EXPORT_ERROR, f"export: {exc}", found, schedule)
-    except NotImplementedError as exc:
-        return JobResult(Status.NOT_IMPLEMENTED, f"not implemented yet: {exc}", found, schedule)
 
     return _done(
         JobResult(
@@ -169,17 +173,11 @@ def check(
         )
 
     try:
-        report = reconciliation.preview(
-            collections,
-            config,
-            state_path=state_path,
-            client=client if client is not None else data_export.todoist_client(config),
-            today=day,
+        report = data_export.check(
+            collections, config, state_path=state_path, client=client, today=day
         )
-    except NotImplementedError as exc:
-        return JobResult(
-            Status.NOT_IMPLEMENTED, f"not implemented yet: {exc}", found, schedule, dry_run=True
-        )
+    except TodoistError as exc:
+        return JobResult(Status.TODOIST_ERROR, f"todoist: {exc}", found, schedule, dry_run=True)
 
     return _done(
         JobResult(

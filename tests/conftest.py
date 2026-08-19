@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import httpx
 import pytest
 
 from garbage_collection_automation import configuration
@@ -52,6 +53,26 @@ def make_config(
         export=ExportConfig(todoist=todoist or TodoistExportConfig()),
         web=web or WebConfig(),
     )
+
+
+@pytest.fixture(autouse=True)
+def _no_outside_network(monkeypatch):
+    """The suite answers every API from a fixture; only its own server is real.
+
+    Two modules here open httpx clients of their own when they are not handed
+    one, and a test that forgets to hand one over would quietly talk to
+    mijnafvalwijzer.nl or Todoist - with whatever token the machine happens to
+    have. The web tests do speak HTTP, over the loopback interface, so that is
+    what stays open.
+    """
+    reach = httpx.HTTPTransport.handle_request
+
+    def guard(self, request: httpx.Request) -> httpx.Response:
+        if request.url.host not in ("127.0.0.1", "::1", "localhost"):
+            raise AssertionError(f"a test tried to reach {request.url.host}")
+        return reach(self, request)
+
+    monkeypatch.setattr(httpx.HTTPTransport, "handle_request", guard)
 
 
 @pytest.fixture(autouse=True)

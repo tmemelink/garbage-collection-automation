@@ -90,15 +90,6 @@ def build(*args) -> subprocess.CompletedProcess:
     return subprocess.run([str(BUILD), *args], capture_output=True, text=True, cwd=REPO_ROOT)
 
 
-def test_a_planned_target_is_reported_as_planned_not_as_unknown():
-    """--list calls docker "not implemented yet"; asking for it must say the same."""
-    result = build("docker")
-
-    assert result.returncode == 1
-    assert "not implemented yet" in result.stderr
-    assert "unknown target" not in result.stderr
-
-
 def test_a_target_this_project_does_not_have_is_unknown():
     result = build("solaris")
 

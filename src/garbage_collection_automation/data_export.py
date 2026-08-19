@@ -7,11 +7,13 @@ and the local state file to keep.
 
 from __future__ import annotations
 
+import contextlib
 import logging
+from collections.abc import Iterator
 from datetime import date
 from pathlib import Path
 
-from . import data_processing, reconciliation, state
+from . import data_processing, reconciliation, state, todoist
 from .configuration import Config
 from .data_collection import RawSchedule
 from .data_processing import Collection
@@ -38,14 +40,35 @@ def export(
         log.info("todoist export is disabled in the configuration; nothing was written")
         return Report(Decision(False, "todoist export is disabled in the configuration"))
 
-    return reconciliation.reconcile(
-        collections,
-        config,
-        state_path=state_path,
-        client=client if client is not None else todoist_client(config),
-        schedule=schedule,
-        today=today,
-    )
+    with _client(config, client) as api:
+        return reconciliation.reconcile(
+            collections,
+            config,
+            state_path=state_path,
+            client=api,
+            schedule=schedule,
+            today=today,
+        )
+
+
+def check(
+    collections: list[Collection],
+    config: Config,
+    *,
+    state_path: Path,
+    client: TodoistClient | None = None,
+    today: date | None = None,
+) -> Report:
+    """Ask Todoist what it really holds and say what would change, writing nothing.
+
+    The costly half of ``preview()``: it goes and looks. Whether the target is
+    on at all is the caller's to decide - the page asks this only about a target
+    it has already been told about.
+    """
+    with _client(config, client) as api:
+        return reconciliation.preview(
+            collections, config, state_path=state_path, client=api, today=today
+        )
 
 
 def preview(
@@ -71,6 +94,20 @@ def preview(
     return decision
 
 
-def todoist_client(config: Config) -> TodoistClient:
-    """The client that talks to the Todoist API - see the Todoist setup feature."""
-    raise NotImplementedError("data_export.todoist_client")
+def todoist_client(config: Config) -> todoist.Todoist:
+    """The client that talks to the Todoist API.
+
+    Opens a transport of its own, so whoever builds one closes it again;
+    :func:`_client` is how both callers here do that.
+    """
+    return todoist.Todoist(config)
+
+
+@contextlib.contextmanager
+def _client(config: Config, client: TodoistClient | None) -> Iterator[TodoistClient]:
+    """The caller's client, or one of ours - and ours is closed again afterwards."""
+    if client is not None:
+        yield client
+        return
+    with contextlib.closing(todoist_client(config)) as owned:
+        yield owned

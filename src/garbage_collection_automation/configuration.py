@@ -426,6 +426,9 @@ enabled = {_toml_bool(todoist.enabled)}
 # the env file next to this one, which run-job.sh sources before every run; when
 # that variable is set it wins, and the web interface leaves this key alone.
 token = {_toml_str(token)}
+# The project the to-dos go in; it has to exist in Todoist already. A name that
+# is not there fails the run rather than being created, so a typo cannot scatter
+# to-dos into a project nobody looks at.
 project = {_toml_str(todoist.project)}
 # How long before the collection moment the to-dos reminder goes off, in days.
 # The to-dos themselves are created for the whole lookahead window above.

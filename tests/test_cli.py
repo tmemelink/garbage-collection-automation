@@ -107,9 +107,9 @@ def test_missing_config_reports_without_a_traceback(tmp_path, caplog):
             gca.EXIT_EXPORT_ERROR,
         ),
         (
-            Status.NOT_IMPLEMENTED,
-            "not implemented yet: data_export.todoist_client",
-            gca.EXIT_NOT_IMPLEMENTED,
+            Status.TODOIST_ERROR,
+            "todoist: todoist refused the token (HTTP 401)",
+            gca.EXIT_TODOIST_ERROR,
         ),
     ],
 )

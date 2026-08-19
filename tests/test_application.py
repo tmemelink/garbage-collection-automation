@@ -19,6 +19,7 @@ from garbage_collection_automation.application import Status
 from garbage_collection_automation.configuration import TodoistExportConfig
 from garbage_collection_automation.data_collection import RawSchedule
 from garbage_collection_automation.reconciliation import Decision, Report
+from garbage_collection_automation.todoist import TodoistError
 
 from .conftest import make_config, read_fixture
 from .test_reconciliation import (
@@ -50,6 +51,15 @@ SCHEDULE = RawSchedule(
 
 #: The real fetch, taken before the fixture below replaces it with a stub.
 FETCH = data_collection.collect
+
+
+class RefusingTodoist:
+    """A Todoist that answers every call with the error the real client raises."""
+
+    def _refuse(self, *_args: object) -> None:
+        raise TodoistError("todoist refused the token (HTTP 401)", status=401)
+
+    list_tasks = create_task = update_task = delete_task = _refuse
 
 
 @pytest.fixture
@@ -228,12 +238,13 @@ def test_an_unrecordable_export_is_reported_as_such(tmp_path):
     assert "state.json" in result.summary
 
 
-def test_a_missing_todoist_client_is_reported_as_such(state_path):
-    """Until the Todoist module lands, a real run stops here without a traceback."""
-    result = application.run(config(), state_path=state_path, today=TODAY)
+def test_a_todoist_that_refuses_is_an_outcome_and_not_a_traceback(state_path):
+    """Their API is the one thing here we do not control; a cron run must survive it."""
+    result = application.run(config(), state_path=state_path, client=RefusingTodoist(), today=TODAY)
 
-    assert result.status is Status.NOT_IMPLEMENTED
-    assert "todoist_client" in result.summary
+    assert result.status is Status.TODOIST_ERROR
+    assert "todoist: todoist refused the token" in result.summary
+    assert result.collections == (RESTAFVAL, GFT)
 
 
 def test_a_todoist_that_breaks_mid_delta_is_not_swallowed(state_path):
@@ -398,10 +409,12 @@ def test_check_reports_an_unreachable_source_the_way_a_run_does(state_path, unre
     assert result.dry_run
 
 
-def test_check_reports_the_client_that_does_not_exist_yet_as_such(state_path):
-    """Until data_export.todoist_client() is written, the page must say so plainly."""
-    result = application.check(config(), state_path=state_path, today=TODAY)
+def test_check_reports_a_todoist_that_refuses_the_way_a_run_does(state_path):
+    """The button presser gets the same sentence the cron log would have got."""
+    result = application.check(
+        config(), state_path=state_path, client=RefusingTodoist(), today=TODAY
+    )
 
-    assert result.status is Status.NOT_IMPLEMENTED
+    assert result.status is Status.TODOIST_ERROR
     assert result.dry_run, "nothing was written, whatever else went wrong"
     assert result.collections == (RESTAFVAL, GFT)

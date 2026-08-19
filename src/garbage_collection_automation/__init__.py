@@ -22,7 +22,7 @@ DEFAULT_STATE = Path("/var/lib/garbage-collection-automation/state.json")
 
 EXIT_OK = 0
 EXIT_CONFIG_ERROR = 2
-EXIT_NOT_IMPLEMENTED = 3
+EXIT_TODOIST_ERROR = 3
 EXIT_COLLECTION_ERROR = 4
 EXIT_EXPORT_ERROR = 5
 #: The web interface only; every code above belongs to the job.
@@ -31,7 +31,7 @@ EXIT_WEB_ERROR = 6
 #: How a run's outcome reaches cron; see the Exit codes table in the README.
 EXIT_CODES = {
     Status.OK: EXIT_OK,
-    Status.NOT_IMPLEMENTED: EXIT_NOT_IMPLEMENTED,
+    Status.TODOIST_ERROR: EXIT_TODOIST_ERROR,
     Status.COLLECTION_ERROR: EXIT_COLLECTION_ERROR,
     Status.EXPORT_ERROR: EXIT_EXPORT_ERROR,
 }
