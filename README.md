@@ -91,7 +91,7 @@ The recommended LXC configuration is as follows.
 
 | Setting       | Value                | Why                                                        |
 | ------------- | -------------------- | ---------------------------------------------------------- |
-| Template      | `debian-12-standard` | What the installer targets; downloaded if absent           |
+| Template      | `debian-12-standard` | What the installer targets                                 |
 | Cores         | 1                    | One HTTP request a day                                     |
 | Memory / Swap | 256 MiB each         | A run peaks around 40 MB, the web interface holds about 30 |
 | Disk          | 2 GiB                | A finished install uses about 0.8 GB                       |
