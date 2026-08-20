@@ -223,7 +223,7 @@ SUMMARY
         cat <<SUMMARY
   Config         pct exec ${VMID} -- editor /etc/${APP_NAME}/config.toml
   Secrets        pct exec ${VMID} -- editor /etc/${APP_NAME}/env
-  Run it once    pct exec ${VMID} -- /root/run-garbage-collection.sh
+  Run it once    pct exec ${VMID} -- /root/garbage-collection/run-garbage-collection.sh
 
 SUMMARY
     else

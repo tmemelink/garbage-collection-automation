@@ -432,24 +432,89 @@ def test_a_page_removed_from_the_source_does_not_survive_in_the_install(tmp_path
     assert not (tmp_path / "opt" / "ui" / "stale.html").exists()
 
 
-def test_the_cron_entry_names_the_installed_wrapper(tmp_path, source):
-    shutil.copytree(REPO_ROOT / "scheduling", source / "scheduling")
+def schedule_step(tmp_path, source, step="install_schedule", **overrides):
+    """Run the schedule step with the init system stood in for by recording stubs."""
+    shutil.copytree(REPO_ROOT / "scheduling", source / "scheduling", dirs_exist_ok=True)
     cron_dir = tmp_path / "cron.d"
-    cron_dir.mkdir()
+    cron_dir.mkdir(exist_ok=True)
+    recorder = tmp_path / "init-calls"
 
     result = run_step(
-        "install_schedule() { :; }\n"
-        f'sed -e "s|@APP_USER@|nobody|g" -e "s|@INSTALL_DIR@|{tmp_path / "opt"}|g" '
-        f'-e "s|@LOG_DIR@|{tmp_path / "var-log"}|g" '
-        f'"$SRC_DIR/scheduling/garbage-collection-automation.cron" > "{cron_dir}/entry"',
+        f'systemctl() {{ echo "systemctl $*" >> "{recorder}"; }}\n'
+        f'service() {{ echo "service $*" >> "{recorder}"; }}\n'
+        f"{step}",
         tmp_path,
         source,
+        CRON_DIR=str(cron_dir),
+        **overrides,
+    )
+    called = recorder.read_text() if recorder.exists() else ""
+    return result, cron_dir / "garbage-collection-automation", called
+
+
+def test_the_cron_entry_names_the_installed_wrapper(tmp_path, source):
+    result, entry_file, _called = schedule_step(tmp_path, source)
+
+    assert result.returncode == 0, result.stderr
+    entry = entry_file.read_text()
+    assert "@APP_USER@" not in entry and "@INSTALL_DIR@" not in entry
+    assert f"{tmp_path / 'opt'}/bin/run-job.sh" in entry
+
+
+def test_the_cron_daemon_is_never_restarted(tmp_path, source):
+    """cron re-reads /etc/cron.d every minute, so the entry above is live on its own.
+
+    Restarting it was the old behaviour and it is what could leave two daemons
+    racing; this runs the real cron_is_running against this host's /proc.
+    """
+    result, entry_file, called = schedule_step(tmp_path, source)
+
+    assert result.returncode == 0, result.stderr
+    assert entry_file.exists()
+    assert "restart" not in called
+    # --now is a start in disguise, and on a systemd host it is the whole of it.
+    assert "--now" not in called
+
+
+def test_a_running_daemon_is_left_alone(tmp_path, source):
+    """Starting a second cron next to the first is what prints, and then dies with,
+
+    "cron: can't lock /var/run/crond.pid, otherpid may be 87" - so it is not done.
+    """
+    result, entry_file, called = schedule_step(
+        tmp_path, source, step="cron_is_running() { return 0; }\ninstall_schedule"
     )
 
     assert result.returncode == 0, result.stderr
-    entry = (cron_dir / "entry").read_text()
-    assert "@APP_USER@" not in entry and "@INSTALL_DIR@" not in entry
-    assert f"{tmp_path / 'opt'}/bin/run-job.sh" in entry
+    assert entry_file.exists()
+    assert "start" not in called and "--now" not in called
+
+
+def test_a_daemon_that_is_not_running_is_started(tmp_path, source):
+    """A container whose cron was never started would otherwise never run the job."""
+    result, _entry_file, called = schedule_step(
+        tmp_path,
+        source,
+        step="has_systemd() { return 0; }\ncron_is_running() { return 1; }\ninstall_schedule",
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "systemctl enable cron" in called
+    assert "systemctl start cron" in called
+
+
+def test_without_systemd_the_daemon_is_started_rather_than_restarted(tmp_path, source):
+    """`service cron restart` next to a daemon the init script cannot see is the same
+    double start, so this path only ever starts a cron that is missing."""
+    result, _entry_file, called = schedule_step(
+        tmp_path,
+        source,
+        step="has_systemd() { return 1; }\ncron_is_running() { return 1; }\ninstall_schedule",
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "service cron start" in called
+    assert "restart" not in called
 
 
 def test_the_build_caches_do_not_survive_the_install(tmp_path, source):
@@ -594,21 +659,53 @@ def test_the_web_interface_is_installed_unless_it_is_declined(tmp_path, source):
 
 def home_command(tmp_path, source, **overrides):
     """Write the by-hand command into a home directory of this test's own."""
-    command = tmp_path / "root" / "run-garbage-collection.sh"
-    result = run_step("install_home_command", tmp_path, source, HOME_CMD=str(command), **overrides)
+    home = tmp_path / "root"
+    command = home / "garbage-collection" / "run-garbage-collection.sh"
+    result = run_step(
+        "install_home_command",
+        tmp_path,
+        source,
+        HOME_BASE_DIR=str(home),
+        HOME_CMD=str(command),
+        **overrides,
+    )
     return result, command
 
 
-def test_the_by_hand_command_lands_in_the_home_directory(tmp_path, source):
-    """`pct enter` lands in root's home, so a command there needs no path to run."""
+def test_the_by_hand_command_lands_in_a_folder_of_its_own(tmp_path, source):
+    """`pct enter` lands in root's home; one folder there is what the user finds."""
     result, command = home_command(tmp_path, source)
 
     assert result.returncode == 0, result.stderr
     assert command.exists(), "the installer left nothing to run by hand"
+    assert command.parent.name == "garbage-collection", "the folder is the whole point"
     assert os.access(command, os.X_OK)
     written = command.read_text()
     assert f"{tmp_path / 'opt'}/bin/run-job.sh" in written
     assert "--dry-run" in written, "the comment header is the only usage anyone will read"
+
+
+def test_the_by_hand_command_says_how_to_type_its_own_path(tmp_path, source):
+    """The header is read inside the container, where the folder is under ~."""
+    _, command = home_command(tmp_path, source)
+
+    written = command.read_text()
+    assert "~/garbage-collection/run-garbage-collection.sh" in written
+    assert f"#   {tmp_path}" not in written, "a path from the installing host means nothing there"
+
+
+def test_an_upgrade_takes_away_the_loose_command_of_an_older_install(tmp_path, source):
+    """Two copies and only one of them kept up to date is how the stale one gets run."""
+    home = tmp_path / "root"
+    home.mkdir(parents=True, exist_ok=True)
+    loose = home / "run-garbage-collection.sh"
+    loose.write_text("#!/bin/sh\necho 'the install before the folder'\n")
+
+    result, command = home_command(tmp_path, source)
+
+    assert result.returncode == 0, result.stderr
+    assert command.exists()
+    assert not loose.exists(), "the copy nothing rewrites is the copy that goes stale"
 
 
 def test_the_by_hand_command_runs_the_job_as_the_service_user(tmp_path, source):
@@ -645,6 +742,230 @@ def test_the_by_hand_command_says_so_when_there_is_nothing_installed(tmp_path, s
 
     assert result.returncode == 1
     assert "not installed" in result.stderr
+
+
+def home_web_command(tmp_path, source, **overrides):
+    """Write the web interface's by-hand command into a home directory of this test's own."""
+    home = tmp_path / "root"
+    command = home / "garbage-collection" / "run-web-interface.sh"
+    result = run_step(
+        "install_home_web_command",
+        tmp_path,
+        source,
+        HOME_BASE_DIR=str(home),
+        HOME_WEB_CMD=str(command),
+        **overrides,
+    )
+    return result, command
+
+
+def stub_server(tmp_path):
+    """A stand-in for the installed server, which says how it was called."""
+    binary = tmp_path / "opt" / ".venv" / "bin" / "garbage-collection-automation-web"
+    binary.parent.mkdir(parents=True, exist_ok=True)
+    binary.write_text('#!/bin/sh\necho "server $*"\necho "token=[${GCA_TODOIST_TOKEN:-unset}]"\n')
+    binary.chmod(0o755)
+    return binary
+
+
+def stub_commands(tmp_path, **scripts):
+    """An environment whose PATH finds these stand-ins before the host's own."""
+    directory = tmp_path / "stub-bin"
+    directory.mkdir(exist_ok=True)
+    for name, body in scripts.items():
+        (directory / name).write_text(body)
+        (directory / name).chmod(0o755)
+    return {**os.environ, "PATH": f"{directory}:{os.environ['PATH']}"}
+
+
+#: A service that is not running, so the by-hand command may have the port.
+NOTHING_SERVING = "#!/bin/sh\nexit 3\n"
+
+#: runuser, saying what it was handed before becoming the thing it was handed.
+#: The three it drops are `-u`, the user and the `--` that ends its own options.
+PASS_THROUGH = '#!/bin/sh\necho "runuser argv: $*"\nshift 3\nexec "$@"\n'
+
+
+def test_the_web_interface_gets_a_by_hand_command_of_its_own(tmp_path, source):
+    """The service survives a reboot; this is for watching the page answer."""
+    result, command = home_web_command(tmp_path, source)
+
+    assert result.returncode == 0, result.stderr
+    assert command.exists(), "the interface can only be started through systemd otherwise"
+    assert command.parent.name == "garbage-collection", "both commands, one folder"
+    assert os.access(command, os.X_OK)
+    written = command.read_text()
+    assert "~/garbage-collection/run-web-interface.sh" in written
+    assert "ctrl-c" in written, "a foreground server is only useful if it says how to stop"
+
+
+def test_the_web_command_serves_as_the_service_user_with_the_unit_s_paths(tmp_path, source):
+    """Config, state and the page: the same three files the service reads and writes."""
+    _, command = home_web_command(tmp_path, source)
+    stub_server(tmp_path)
+
+    result = subprocess.run(
+        [str(command)],
+        capture_output=True,
+        text=True,
+        env=stub_commands(tmp_path, runuser=PASS_THROUGH, systemctl=NOTHING_SERVING),
+        timeout=60,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "runuser argv: -u nobody" in result.stdout
+    assert f"server --config {tmp_path / 'etc' / 'config.toml'}" in result.stdout
+    assert f"--state {tmp_path / 'var-lib' / 'state.json'}" in result.stdout
+    assert f"--ui-dir {tmp_path / 'opt' / 'ui'}" in result.stdout
+
+
+def test_the_web_command_passes_what_it_is_given_to_the_server(tmp_path, source):
+    """`--version`, `--help` and the rest are the server's arguments, not this wrapper's."""
+    _, command = home_web_command(tmp_path, source)
+    stub_server(tmp_path)
+
+    result = subprocess.run(
+        [str(command), "--version"],
+        capture_output=True,
+        text=True,
+        env=stub_commands(tmp_path, runuser=PASS_THROUGH, systemctl=NOTHING_SERVING),
+        timeout=60,
+    )
+
+    assert result.returncode == 0, result.stderr
+    served = next(line for line in result.stdout.splitlines() if line.startswith("server "))
+    assert served.endswith("--version"), "it goes to the server, after the paths the unit passes"
+
+
+def test_the_web_command_hands_the_token_over_where_ps_cannot_read_it(tmp_path, source):
+    """The page shows the secrets, so it needs them - but every argument is public."""
+    _, command = home_web_command(tmp_path, source)
+    stub_server(tmp_path)
+    (tmp_path / "etc").mkdir(exist_ok=True)
+    (tmp_path / "etc" / "env").write_text(
+        "GCA_TODOIST_TOKEN=from-the-env-file\n"  # pragma: allowlist secret
+    )
+
+    result = subprocess.run(
+        [str(command)],
+        capture_output=True,
+        text=True,
+        env=stub_commands(tmp_path, runuser=PASS_THROUGH, systemctl=NOTHING_SERVING),
+        timeout=60,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "token=[from-the-env-file]" in result.stdout, "the buttons export nothing without it"
+    handed_over = next(
+        line for line in result.stdout.splitlines() if line.startswith("runuser argv:")
+    )
+    assert "from-the-env-file" not in handed_over, "an argument list is readable by everyone"
+
+
+def test_the_web_command_stops_while_the_service_holds_the_port(tmp_path, source):
+    """Two servers, one port: "already in use" is true and says nothing useful."""
+    _, command = home_web_command(tmp_path, source)
+    stub_server(tmp_path)
+
+    result = subprocess.run(
+        [str(command)],
+        capture_output=True,
+        text=True,
+        env=stub_commands(tmp_path, runuser=PASS_THROUGH, systemctl="#!/bin/sh\nexit 0\n"),
+        timeout=60,
+    )
+
+    assert result.returncode == 1
+    assert "server " not in result.stdout, "starting it anyway is what this check prevents"
+    assert "already serving" in result.stderr
+    assert "systemctl stop garbage-collection-automation-web.service" in result.stderr
+
+
+def test_declining_the_web_interface_takes_its_command_away(tmp_path, source):
+    """--no-web removes the unit; the command in front of it cannot outlive that."""
+    _, command = home_web_command(tmp_path, source)
+    assert command.exists()
+
+    result, _ = home_web_command(tmp_path, source, INSTALL_WEB="0")
+
+    assert result.returncode == 0, result.stderr
+    assert not command.exists(), "a command for an interface that is not installed"
+
+
+def uninstall_step(tmp_path, source, *, home_cmd, home_base):
+    """Run --uninstall with everything it removes pointed inside this test.
+
+    APP_NAME is a name of this test's own so the two paths uninstall hardcodes -
+    /etc/cron.d and /etc/logrotate.d - cannot name a file the host has, and the
+    uv cache is redirected for the same reason.
+    """
+    step = textwrap.dedent("""
+        require_root() { :; }
+        systemctl() { :; }
+        userdel() { :; }
+        uninstall
+    """)
+    return run_step(
+        step,
+        tmp_path,
+        source,
+        APP_NAME=f"gca-under-test-{tmp_path.name}",
+        SYSTEMD_DIR=str(tmp_path / "absent-systemd"),
+        UV_CACHE_DIR=str(tmp_path / "uv-cache"),
+        HOME_BASE_DIR=str(home_base),
+        HOME_CMD=str(home_cmd),
+        HOME_WEB_CMD=str(home_cmd.parent / "run-web-interface.sh"),
+    )
+
+
+def test_uninstalling_takes_the_folder_with_the_command(tmp_path, source):
+    """The folder is this installer's doing, so an --uninstall should not leave it behind."""
+    _, command = home_command(tmp_path, source)
+
+    result = uninstall_step(tmp_path, source, home_cmd=command, home_base=tmp_path / "root")
+
+    assert result.returncode == 0, result.stderr
+    assert not command.exists()
+    assert not command.parent.exists(), "an empty folder is still something to clean up by hand"
+
+
+def test_uninstalling_takes_the_web_command_with_it(tmp_path, source):
+    """Both commands are this installer's doing, and both stop working without it."""
+    _, command = home_command(tmp_path, source)
+    _, web_command = home_web_command(tmp_path, source)
+
+    result = uninstall_step(tmp_path, source, home_cmd=command, home_base=tmp_path / "root")
+
+    assert result.returncode == 0, result.stderr
+    assert not web_command.exists()
+    assert not command.parent.exists(), "the folder held nothing else"
+
+
+def test_uninstalling_leaves_a_folder_that_is_not_empty_alone(tmp_path, source):
+    """Whatever else is in there is someone's own; only the command was ours."""
+    _, command = home_command(tmp_path, source)
+    kept = command.parent / "notes.txt"
+    kept.write_text("mine\n")
+
+    result = uninstall_step(tmp_path, source, home_cmd=command, home_base=tmp_path / "root")
+
+    assert result.returncode == 0, result.stderr
+    assert not command.exists()
+    assert kept.read_text() == "mine\n"
+
+
+def test_uninstalling_never_removes_the_home_directory_itself(tmp_path, source):
+    """HOME_CMD can point straight into a home; removing that is not on the menu."""
+    home = tmp_path / "root"
+    home.mkdir(parents=True, exist_ok=True)
+    command = home / "run-garbage-collection.sh"
+    command.write_text("#!/bin/sh\nexit 0\n")
+
+    result = uninstall_step(tmp_path, source, home_cmd=command, home_base=home)
+
+    assert result.returncode == 0, result.stderr
+    assert not command.exists()
+    assert home.is_dir(), "the home directory was never the installer's to remove"
 
 
 def test_the_run_at_the_end_can_be_answered_in_advance(tmp_path, source):

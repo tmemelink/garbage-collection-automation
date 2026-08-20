@@ -154,8 +154,9 @@ repaired by running it again.
 | `--uninstall` | Remove app, user and schedule; keeps config, state and logs |
 
 Set `GITHUB_TOKEN` if the repository is private. `APP_USER`, `INSTALL_DIR`,
-`CONFIG_DIR`, `STATE_DIR`, `LOG_DIR` and `HOME_CMD` can be overridden through
-the environment.
+`CONFIG_DIR`, `STATE_DIR`, `LOG_DIR`, `HOME_CMD_DIR` (the folder the by-hand
+commands go in, `~/garbage-collection` by default), `HOME_CMD` and
+`HOME_WEB_CMD` can be overridden through the environment.
 
 ### What it installs where
 
@@ -164,7 +165,8 @@ the environment.
 | `/opt/garbage-collection-automation` | Application and its virtualenv |
 | `/etc/garbage-collection-automation/config.toml` | Configuration — the installer writes the answers it asked for |
 | `/etc/garbage-collection-automation/env` | Secrets, `KEY=value` per line |
-| `/root/run-garbage-collection.sh` | The by-hand command |
+| `/root/garbage-collection/run-garbage-collection.sh` | The by-hand command |
+| `/root/garbage-collection/run-web-interface.sh` | The by-hand way to serve the page |
 | `/etc/cron.d/garbage-collection-automation` | Schedule, 04:00 every Saturday by default |
 | `/etc/systemd/system/garbage-collection-automation-web.service` | The web interface |
 | `/var/lib/garbage-collection-automation/` | `state.json` and the run lock |
@@ -236,11 +238,12 @@ code 4.
 ## Usage
 
 The job runs on its own from cron. To run it by hand, use the command the
-installer leaves in root's home:
+installer leaves in `~/garbage-collection/` in root's home:
 
 ```sh
-~/run-garbage-collection.sh              # run as the gca user, output on your terminal
-~/run-garbage-collection.sh --dry-run    # collect and process, write nothing
+~/garbage-collection/run-garbage-collection.sh              # run as the gca user, output on your terminal
+~/garbage-collection/run-garbage-collection.sh --dry-run    # collect and process, write nothing
+~/garbage-collection/run-web-interface.sh                   # serve the page here until ctrl-c
 
 tail -f /var/log/garbage-collection-automation/cron.log
 
@@ -248,9 +251,12 @@ cat /var/lib/garbage-collection-automation/state.json   # private address/task m
 rm  /var/lib/garbage-collection-automation/state.json   # forget it; next run re-checks Todoist
 ```
 
-To change the schedule, edit `/etc/cron.d/garbage-collection-automation`.
-Reinstalling rewrites that file from `scheduling/*.cron`, so persistent changes
-belong in the repository template.
+To change the schedule, edit `/etc/cron.d/garbage-collection-automation`. The
+change is live within a minute - cron re-reads that directory on every tick, so
+there is nothing to restart, and restarting cron by hand next to a daemon the
+init system does not track is how you end up with `cron: can't lock
+/var/run/crond.pid`. Reinstalling rewrites that file from `scheduling/*.cron`,
+so persistent changes belong in the repository template.
 
 ### Web interface
 
@@ -267,6 +273,21 @@ port = 8080
 systemctl restart garbage-collection-automation-web
 journalctl -u garbage-collection-automation-web -f    # the access log lives here
 ```
+
+The service is the copy that comes back after a reboot. To watch the page answer
+instead of reading the journal afterwards, serve it on your own terminal: the
+command below runs in the foreground until ctrl-c, as the `gca` user, against the
+same config file, `state.json` and `ui/` the service uses. Only one of the two can
+hold the port, so it stops and says so while the service is running, and anything
+you pass it is handed to the server.
+
+```sh
+systemctl stop garbage-collection-automation-web
+~/garbage-collection/run-web-interface.sh
+```
+
+With `[web] enabled = false` it prints that and exits straight away — the switch
+in `config.toml` is the same one either way.
 
 The server binds **the loopback interface only**, and the configuration accepts
 nothing else: the page has no login and shows both secrets. Reach it over an ssh

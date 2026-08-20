@@ -37,12 +37,16 @@ ADDITION=""
 API_KEY=""
 ASK_CONFIG=1
 
-# The by-hand command lands in root's home rather than in $HOME: this installer
-# is usually reached through `pct exec` or a pipe, neither of which reliably sets
-# HOME, and root's is the shell you land in with `pct enter`.
-HOME_CMD_DIR="${HOME_CMD_DIR:-$(getent passwd root 2>/dev/null | cut -d: -f6)}"
-HOME_CMD_DIR="${HOME_CMD_DIR:-/root}"
+# The by-hand command lands under root's home rather than under $HOME: this
+# installer is usually reached through `pct exec` or a pipe, neither of which
+# reliably sets HOME, and root's is the shell you land in with `pct enter`. It
+# gets a folder of its own there instead of sitting loose next to the dotfiles,
+# so `ls ~` says what this container is for.
+HOME_BASE_DIR="${HOME_BASE_DIR:-$(getent passwd root 2>/dev/null | cut -d: -f6)}"
+HOME_BASE_DIR="${HOME_BASE_DIR:-/root}"
+HOME_CMD_DIR="${HOME_CMD_DIR:-${HOME_BASE_DIR}/garbage-collection}"
 HOME_CMD="${HOME_CMD:-${HOME_CMD_DIR}/run-garbage-collection.sh}"
+HOME_WEB_CMD="${HOME_WEB_CMD:-${HOME_CMD_DIR}/run-web-interface.sh}"
 
 # uv keeps its managed Python here rather than under /root, so the unprivileged
 # service user can actually execute the interpreter the venv points at.
@@ -51,6 +55,7 @@ export UV_CACHE_DIR="${UV_CACHE_DIR:-/var/cache/uv}"
 UV_BIN=/usr/local/bin/uv
 APT_LISTS_DIR="${APT_LISTS_DIR:-/var/lib/apt/lists}"
 SYSTEMD_DIR="${SYSTEMD_DIR:-/etc/systemd/system}"
+CRON_DIR="${CRON_DIR:-/etc/cron.d}"
 
 TMPDIR_CLEANUP=""
 trap 'test -n "$TMPDIR_CLEANUP" && rm -rf "$TMPDIR_CLEANUP"' EXIT
@@ -85,7 +90,9 @@ Usage: install.sh [options]
   -h, --help          Show this help.
 
 Environment overrides: APP_USER, INSTALL_DIR, CONFIG_DIR, STATE_DIR, LOG_DIR,
-HOME_CMD, REPO, GITHUB_TOKEN (for private repositories).
+HOME_CMD_DIR (the folder the by-hand commands go in, default
+~/garbage-collection), HOME_CMD, HOME_WEB_CMD, REPO, GITHUB_TOKEN (for private
+repositories).
 USAGE
 }
 
@@ -126,6 +133,21 @@ parse_args() {
 # Debian 12 has systemd, but the installer must not fall over on a container that
 # was built without it: the job itself is cron, and only the web interface is a unit.
 has_systemd() { [ -d /run/systemd/system ]; }
+
+# Whether a cron daemon is already up. This reads /proc rather than calling pgrep
+# or pidof, neither of which a --no-install-recommends container is guaranteed to
+# have, and it deliberately does not trust /run/crond.pid: a cron whose pidfile
+# went missing is still a cron, and not starting a second one next to it is the
+# whole point of asking.
+cron_is_running() {
+    local dir comm
+    for dir in /proc/[0-9]*; do
+        [ -r "${dir}/comm" ] || continue
+        read -r comm < "${dir}/comm" 2>/dev/null || continue
+        [ "$comm" = "cron" ] && return 0
+    done
+    return 1
+}
 
 # Whether there is anyone to ask. Piping the installer to bash leaves stdin on
 # the script itself, so a question has to go to the terminal directly - and a
@@ -431,15 +453,33 @@ install_schedule() {
     sed -e "s|@APP_USER@|${APP_USER}|g" \
         -e "s|@INSTALL_DIR@|${INSTALL_DIR}|g" \
         -e "s|@LOG_DIR@|${LOG_DIR}|g" \
-        "${SRC_DIR}/scheduling/${APP_NAME}.cron" > "/etc/cron.d/${APP_NAME}"
+        "${SRC_DIR}/scheduling/${APP_NAME}.cron" > "${CRON_DIR}/${APP_NAME}"
     # cron ignores files in /etc/cron.d that are executable or group/world writable.
-    chown root:root "/etc/cron.d/${APP_NAME}"
-    chmod 0644 "/etc/cron.d/${APP_NAME}"
+    chown root:root "${CRON_DIR}/${APP_NAME}"
+    chmod 0644 "${CRON_DIR}/${APP_NAME}"
+
+    # The file above is live within the minute on its own: cron re-reads
+    # /etc/cron.d on every tick, so an entry dropped there needs no restart, no
+    # reload and no signal. What the daemon does need is to be running, and to
+    # still be running after a reboot - and starting it is the part that must not
+    # be done blindly. Told to start next to a cron the init system does not know
+    # about, both systemd and the init script exec a second daemon, and that one
+    # dies on the lock the first still holds:
+    #
+    #   cron: can't lock /var/run/crond.pid, otherpid may be 87: Resource temporarily unavailable
+    #
+    # So a running daemon is left strictly alone, and only enabling - which starts
+    # nothing - is unconditional.
+    if has_systemd; then
+        systemctl enable cron >/dev/null 2>&1 || warn "could not enable the cron service"
+    fi
+
+    cron_is_running && return 0
 
     if has_systemd; then
-        systemctl enable --now cron >/dev/null 2>&1 || warn "could not enable the cron service"
+        systemctl start cron >/dev/null 2>&1 || warn "could not start the cron service"
     else
-        service cron restart >/dev/null 2>&1 || warn "could not restart the cron service"
+        service cron start >/dev/null 2>&1 || warn "could not start the cron service"
     fi
 }
 
@@ -478,14 +518,28 @@ install_web_service() {
     systemctl restart "$unit" || warn "could not start ${unit}; see journalctl -u ${unit}"
 }
 
+# How to type a command's path: `~/...` when it really is under root's home, and
+# the path in full when an override put it somewhere else. Defaults to the job's
+# command, which was the only one when this was written.
+home_cmd_display() {
+    local path="${1:-$HOME_CMD}"
+    # SC2088: the ~ below is text in a comment for someone to read and type, not
+    # a path for this shell to expand.
+    # shellcheck disable=SC2088
+    case "$path" in
+        "${HOME_BASE_DIR}"/*) printf '~/%s' "${path#"${HOME_BASE_DIR}"/}" ;;
+        *)                    printf '%s' "$path" ;;
+    esac
+}
+
 # The job is meant to be forgotten about, but the first thing anyone does after
-# an install is run it once and watch. `pct enter` lands in root's home, so that
-# is where the command to do it goes - one name, no paths to remember.
+# an install is run it once and watch. `pct enter` lands in root's home, so a
+# folder of this application's own goes there, with that command in it.
 install_home_command() {
     log "writing the by-hand command to ${HOME_CMD}"
     install -d -m 0700 "$(dirname "$HOME_CMD")"
 
-    # SC2094: the basename below only reads the name, never the file being written.
+    # SC2094: the display path below only reads the name, never the file being written.
     # shellcheck disable=SC2094
     cat > "$HOME_CMD" <<HEADER
 #!/usr/bin/env bash
@@ -493,8 +547,8 @@ install_home_command() {
 # Run ${APP_NAME} once, right now, with the output on this terminal.
 # Cron runs the same wrapper on its own schedule; this is only the by-hand way.
 #
-#   ~/$(basename "$HOME_CMD")             collect, process and export
-#   ~/$(basename "$HOME_CMD") --dry-run   collect and process, write nothing
+#   $(home_cmd_display)             collect, process and export
+#   $(home_cmd_display) --dry-run   collect and process, write nothing
 #
 # Anything you pass is handed to the application. Written by install.sh, which
 # writes it again on every upgrade, so edits here do not survive one.
@@ -529,6 +583,117 @@ SCRIPT
 
     chown root:root "$HOME_CMD"
     chmod 0755 "$HOME_CMD"
+
+    # An install from before the folder existed left the command loose in the
+    # home directory. Nothing rewrites that copy any more, so it is the one that
+    # goes stale: now that the folder holds a fresh one, take the old one away.
+    local legacy
+    legacy="${HOME_BASE_DIR}/$(basename "$HOME_CMD")"
+    if [ "$legacy" != "$HOME_CMD" ] && [ -f "$legacy" ]; then
+        log "removing the command the install before this one left in ${HOME_BASE_DIR}"
+        rm -f "$legacy"
+    fi
+}
+
+# The interface's own by-hand command, next to the job's. The service is the copy
+# that comes back after a reboot; this one puts the same server on a terminal,
+# which is what you want while you are watching the page answer - every request
+# is logged here instead of into the journal.
+install_home_web_command() {
+    if [ "$INSTALL_WEB" -eq 0 ]; then
+        # An install that gives the interface up takes its command with it, the
+        # same way it takes the unit.
+        rm -f "$HOME_WEB_CMD"
+        return
+    fi
+
+    log "writing the by-hand web command to ${HOME_WEB_CMD}"
+    install -d -m 0700 "$(dirname "$HOME_WEB_CMD")"
+
+    # SC2094: the display path below only reads the name, never the file being written.
+    # shellcheck disable=SC2094
+    cat > "$HOME_WEB_CMD" <<HEADER
+#!/usr/bin/env bash
+#
+# Serve the ${APP_NAME} web interface on this terminal, in the
+# foreground, until ctrl-c stops it. Nothing keeps running afterwards.
+#
+#   $(home_cmd_display "$HOME_WEB_CMD")
+#
+# ${APP_NAME}-web.service is the same server, started at boot
+# and logging to the journal. Only one of the two can hold the port, so this
+# one stops rather than starts while the service has it.
+#
+# Whether the server listens at all is [web] enabled in
+# ${CONFIG_DIR}/config.toml: with that false it says so and exits straight
+# away, which is the switch working rather than this command failing.
+#
+# Anything you pass is handed to the server. Written by install.sh, which writes
+# it again on every upgrade, so edits here do not survive one.
+
+set -euo pipefail
+
+APP_USER="${APP_USER}"
+UNIT="${APP_NAME}-web.service"
+WEB_BIN="${INSTALL_DIR}/.venv/bin/${APP_NAME}-web"
+CONFIG_FILE="${CONFIG_DIR}/config.toml"
+ENV_FILE="${CONFIG_DIR}/env"
+STATE_FILE="${STATE_DIR}/state.json"
+UI_DIR="${INSTALL_DIR}/ui"
+HEADER
+
+    cat >> "$HOME_WEB_CMD" <<'SCRIPT'
+
+[ -x "$WEB_BIN" ] || {
+    echo "not installed: ${WEB_BIN}" >&2
+    exit 1
+}
+
+# Two servers and one port: the one systemd started is already on it, and all
+# this one would manage to say is "something is already listening there". Name
+# the thing that has it, and what to type to get it back.
+if command -v systemctl >/dev/null 2>&1 && systemctl is-active --quiet "$UNIT"; then
+    echo "${UNIT} is already serving the page." >&2
+    echo "to have it on this terminal instead: systemctl stop ${UNIT}" >&2
+    exit 1
+fi
+
+# The three paths the unit passes for the same reason it does: the defaults are
+# derived from where the package was imported from, and this run has to read and
+# write the very files the scheduled one does.
+SERVER=("$WEB_BIN" --config "$CONFIG_FILE" --state "$STATE_FILE" --ui-dir "$UI_DIR" "$@")
+
+# The page's buttons run the pipeline and rewrite config.toml, and both of those
+# files belong to the service user. A run as root would leave root-owned files
+# behind for the next cron run - which is not root - to fail on.
+if [ "$(id -un)" = "$APP_USER" ]; then
+    if [ -r "$ENV_FILE" ]; then
+        set -a
+        # shellcheck disable=SC1090
+        . "$ENV_FILE"
+        set +a
+    fi
+    exec "${SERVER[@]}"
+fi
+
+# The env file holds the tokens, so it is read after the switch to the service
+# user rather than before it: sudo drops what it was not told to keep, and
+# telling it would mean putting a token in an argument list that `ps` shows to
+# everyone. The file is group-readable by that user, which is all this needs.
+SOURCE_THEN_RUN='if [ -r "$1" ]; then set -a; . "$1"; set +a; fi; shift; exec "$@"'
+
+if command -v runuser >/dev/null 2>&1; then
+    exec runuser -u "$APP_USER" -- bash -c "$SOURCE_THEN_RUN" web "$ENV_FILE" "${SERVER[@]}"
+elif command -v sudo >/dev/null 2>&1; then
+    exec sudo -u "$APP_USER" -- bash -c "$SOURCE_THEN_RUN" web "$ENV_FILE" "${SERVER[@]}"
+fi
+
+echo "cannot run as ${APP_USER}: neither runuser nor sudo is installed" >&2
+exit 1
+SCRIPT
+
+    chown root:root "$HOME_WEB_CMD"
+    chmod 0755 "$HOME_WEB_CMD"
 }
 
 install_logrotate() {
@@ -639,7 +804,16 @@ uninstall() {
         rm -f "${SYSTEMD_DIR}/${APP_NAME}-web.service"
         systemctl daemon-reload >/dev/null 2>&1 || true
     fi
-    rm -f "/etc/cron.d/${APP_NAME}" "/etc/logrotate.d/${APP_NAME}" "$HOME_CMD"
+    rm -f "${CRON_DIR}/${APP_NAME}" "/etc/logrotate.d/${APP_NAME}" "$HOME_CMD" "$HOME_WEB_CMD"
+    # The folder around the commands goes too, but only if it is a folder this
+    # installer made: an override that put a command straight into a home
+    # directory must not take the home directory with it, and anything else
+    # left in there is someone's own and stays.
+    local cmd_dir
+    for cmd_dir in "$(dirname "$HOME_CMD")" "$(dirname "$HOME_WEB_CMD")"; do
+        [ "$cmd_dir" = "$HOME_BASE_DIR" ] && continue
+        rmdir --ignore-fail-on-non-empty "$cmd_dir" 2>/dev/null || true
+    done
     # The managed interpreter and the cache are this installer's doing too, and
     # they are the biggest thing it ever put on the disk.
     rm -rf "$INSTALL_DIR" "$UV_PYTHON_INSTALL_DIR" "$UV_CACHE_DIR"
@@ -666,7 +840,7 @@ $(log "${APP_NAME} installed")
   Config     ${CONFIG_DIR}/config.toml   ${config_note}
   Secrets    ${CONFIG_DIR}/env           <- GCA_TODOIST_TOKEN, GCA_AFVALWIJZER_API_KEY
   Command    ${INSTALL_DIR}/.venv/bin/${APP_NAME}
-  Schedule   /etc/cron.d/${APP_NAME}
+  Schedule   ${CRON_DIR}/${APP_NAME}
   Logs       ${LOG_DIR}/
 
   Run it once by hand, as the job user, with the output on your terminal:
@@ -680,6 +854,10 @@ SUMMARY
   The web interface is installed but switched off. To use it, set [web] enabled
   to true in ${CONFIG_DIR}/config.toml and then:
       systemctl restart ${APP_NAME}-web
+
+  Or serve it on your terminal instead, until ctrl-c - the service has to be
+  stopped for that, because the two share a port:
+      ${HOME_WEB_CMD}
 
   It listens on localhost only. From your workstation:
       ssh -N -L 8080:127.0.0.1:8080 root@<container>   # then open http://127.0.0.1:8080/
@@ -702,6 +880,7 @@ main() {
     install_schedule
     install_web_service
     install_home_command
+    install_home_web_command
     install_logrotate
     reclaim_space
     verify
