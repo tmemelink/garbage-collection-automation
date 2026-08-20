@@ -372,7 +372,7 @@ far they are allowed to get:
 
 | Button                        | Endpoint            | Reads              | Writes                            |
 | ----------------------------- | ------------------- | ------------------ | --------------------------------- |
-| *Collect now*                 | `POST /api/collect` | mijnafvalwijzer.nl | nothing — a dry run               |
+| *Collect now*                 | `POST /api/gather`  | mijnafvalwijzer.nl | nothing — a dry run               |
 | *Check Todoist*               | `POST /api/check`   | also Todoist       | nothing                           |
 | *Apply delta*                 | `POST /api/apply`   | also Todoist       | the to-dos, and `state.json`      |
 | *Save configuration*          | `POST /api/config`  | the form           | `config.toml`, rewritten in place |

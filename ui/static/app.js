@@ -15,9 +15,16 @@
 const el = (id) => document.getElementById(id);
 const clone = (id) => el(id).content.firstElementChild.cloneNode(true);
 
-/* The three buttons, in order of how much each one changes. */
+/*
+ * The three buttons, in order of how much each one changes. The key is the
+ * button's id in index.html; the endpoint is the server's route, and the two
+ * differ for the first one on purpose: a path ending in /collect is what
+ * content blockers drop as a Google Analytics beacon, so the request never
+ * leaves the browser and the page can only say "NetworkError" about a server
+ * that is running perfectly well. See ROUTES in web.py.
+ */
 const ACTIONS = {
-  collect: { endpoint: "/api/collect", running: "Collecting…" },
+  collect: { endpoint: "/api/gather", running: "Collecting…" },
   check: { endpoint: "/api/check", running: "Asking Todoist…" },
   apply: { endpoint: "/api/apply", running: "Applying…" },
 };

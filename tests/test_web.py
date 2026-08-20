@@ -200,7 +200,7 @@ def test_every_answer_carries_the_security_headers(client, path):
         ("GET", "/"),
         ("GET", "/healthz"),
         ("GET", "/api/state"),
-        ("POST", "/api/collect"),
+        ("POST", "/api/gather"),
         ("GET", "/nope.html"),
         ("POST", "/api/wat"),
     ],
@@ -476,7 +476,7 @@ def test_every_field_the_page_saves_has_a_name_to_confirm_it_by(client):
 
 
 def test_a_button_runs_the_job_and_answers_with_what_it_found(client):
-    response = client.post("/api/collect", json={})
+    response = client.post("/api/gather", json={})
 
     assert response.status_code == 200
     body = response.json()
@@ -506,7 +506,7 @@ def test_an_endpoint_that_does_not_exist_says_so_in_json(client):
     assert "error" in response.json()
 
 
-@pytest.mark.parametrize("route", ["collect", "check", "apply", "config", "stop"])
+@pytest.mark.parametrize("route", ["gather", "check", "apply", "config", "stop"])
 def test_nothing_that_changes_anything_can_be_reached_with_a_get(client, route):
     """A link, a redirect or a prefetch must never be able to set the job going."""
     response = client.get(f"/api/{route}")
@@ -524,7 +524,7 @@ def test_the_read_only_endpoint_is_not_a_post(client):
 
 def test_the_wrong_method_is_refused_in_json_like_every_other_endpoint(client):
     """The page parses one shape; a text/plain refusal is a parse error to it."""
-    response = client.get("/api/collect")
+    response = client.get("/api/gather")
 
     assert response.headers["content-type"] == "application/json"
     assert "POST" in response.json()["error"]
@@ -540,7 +540,7 @@ def test_a_run_already_in_progress_is_a_conflict_not_a_queue(client, paths, monk
         yield  # pragma: no cover - never reached
 
     monkeypatch.setattr(api, "_locked", busy)
-    response = client.post("/api/collect", json={})
+    response = client.post("/api/gather", json={})
 
     assert response.status_code == 409
     assert "in progress" in response.json()["error"]
@@ -550,7 +550,7 @@ def test_a_configuration_that_stopped_loading_is_reported_not_crashed(client, pa
     """Someone edited the file by hand while the server was up; say so, do not fall over."""
     paths.config.write_text("[address]\npostcode = 'nope'\n")
 
-    response = client.post("/api/collect", json={})
+    response = client.post("/api/gather", json={})
 
     assert response.status_code == 500
     assert "postcode" in response.json()["error"]
@@ -561,7 +561,7 @@ def test_a_job_that_raises_becomes_a_sentence_rather_than_a_traceback(client, mo
         raise RuntimeError("the token was made of cheese")
 
     monkeypatch.setattr(api, "collect", explode)
-    response = client.post("/api/collect", json={})
+    response = client.post("/api/gather", json={})
 
     assert response.status_code == 500
     assert "the token was made of cheese" not in response.text, "internals stay in the log"
@@ -698,7 +698,7 @@ def test_a_post_from_another_site_is_refused(client):
 def test_the_page_posting_to_its_own_server_is_not(client):
     origin = str(client.base_url).rstrip("/")
 
-    response = client.post("/api/collect", json={}, headers={"Origin": origin})
+    response = client.post("/api/gather", json={}, headers={"Origin": origin})
 
     assert response.status_code == 200
 
@@ -792,3 +792,22 @@ def test_every_route_the_page_calls_exists(client):
     assert called, "the page stopped calling anything"
     for path in called:
         assert path[len(web.API_PREFIX) :] in web.ROUTES, f"the page calls {path}"
+
+
+#: Path fragments the filter lists every content blocker ships drop on sight,
+#: because they are what analytics beacons post to. A route named for one of
+#: these is refused inside the browser: the request never arrives, the server
+#: logs nothing, and the page can only report the browser's own "NetworkError"
+#: about a server that is answering everything else perfectly well. That is a
+#: day of debugging the wrong half of the system, which is why it is a test.
+BLOCKED_FRAGMENTS = ("collect", "track", "analytics", "telemetry", "beacon", "pixel")
+
+
+@pytest.mark.parametrize("route", sorted(web.ROUTES))
+def test_no_route_is_named_after_an_analytics_beacon(route):
+    """No endpoint may carry a name a content blocker eats before it is sent."""
+    for fragment in BLOCKED_FRAGMENTS:
+        assert fragment not in route, (
+            f"/api/{route} contains {fragment!r}, which content blockers drop by path; "
+            f"the request would never leave the browser - see ROUTES in web.py"
+        )

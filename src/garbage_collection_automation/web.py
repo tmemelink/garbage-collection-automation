@@ -128,9 +128,17 @@ log = logging.getLogger(__name__)
 #: Which methods each endpoint answers. GET is for what only reads; the three
 #: actions, the save and the stop are POST because they run the job, write a
 #: file, or end the process.
+#:
+#: "gather" is the odd name here, and it is deliberate: the button is *Collect
+#: now* and the function behind it is ``api.collect``, but a path ending in
+#: ``/collect`` is what Google Analytics posts to, so the filter lists every
+#: content blocker ships block it by path. Blocked in the browser, the request
+#: never arrives - the server logs nothing, and the page can only report the
+#: browser's own "NetworkError". A working server is indistinguishable from a
+#: broken one, so the endpoint is named around the filter instead.
 ROUTES = {
     "state": frozenset({"GET"}),
-    "collect": frozenset({"POST"}),
+    "gather": frozenset({"POST"}),
     "check": frozenset({"POST"}),
     "apply": frozenset({"POST"}),
     "config": frozenset({"POST"}),
@@ -146,7 +154,10 @@ STOP_ROUTE = "stop"
 #: each one changes; see the table in :mod:`api`. The names are looked up on
 #: :mod:`api` when the button is pressed, not bound here: a table of function
 #: objects goes stale the moment anything wraps or replaces one of them.
-ACTIONS = {"collect": "collect", "check": "check", "apply": "apply"}
+#:
+#: This is also what lets the route be named for the filter lists while the
+#: function keeps the name the rest of the code calls it by - see ``ROUTES``.
+ACTIONS = {"gather": "collect", "check": "check", "apply": "apply"}
 
 
 class WebError(Exception):
