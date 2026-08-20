@@ -44,7 +44,9 @@ DEFAULT_WASTE_TYPES = ("restafval", "papier", "gft")
 
 _POSTCODE_RE = re.compile(r"^([1-9][0-9]{3})\s*([A-Za-z]{2})$")
 _DUE_TIME_RE = re.compile(r"^([0-9]{1,2}):([0-9]{2})$")
-_LOG_LEVELS = ("DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL")
+#: The levels [logging] level accepts, most talkative first. The web interface
+#: builds its dropdown from this, so a level added here needs no second list.
+LOG_LEVELS = ("DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL")
 
 
 class ConfigError(Exception):
@@ -300,8 +302,8 @@ def _logging(section: dict) -> LoggingConfig:
     label = "logging"
     _reject_unknown(section, label, {"level"})
     level = _optional_str(section, label, "level", "INFO").upper()
-    if level not in _LOG_LEVELS:
-        raise ConfigError(f"[{label}] level '{level}' is not one of {', '.join(_LOG_LEVELS)}")
+    if level not in LOG_LEVELS:
+        raise ConfigError(f"[{label}] level '{level}' is not one of {', '.join(LOG_LEVELS)}")
     return LoggingConfig(level=level)
 
 

@@ -9,6 +9,11 @@ address and nothing else - see ``_host()`` in :mod:`configuration`. To reach it
 from another machine, forward the port over ssh, which authenticates the person
 the page has no way to.
 
+One endpoint is unlike the rest: ``/api/stop`` switches ``[web] enabled`` off
+and then ends this process. It exits 0, so the unit's ``Restart=on-failure``
+leaves it stopped, and the config key is what keeps it stopped across a reboot.
+It is the page putting itself away for the eleven months a year nobody needs it.
+
 Having no login is exactly why the endpoints check where a request came from.
 A page on any website the browser has open can post to 127.0.0.1 without being
 able to read the answer, which is enough to press "apply delta" on someone
@@ -117,14 +122,21 @@ log = logging.getLogger(__name__)
 
 
 #: Which methods each endpoint answers. GET is for what only reads; the three
-#: actions and the save are POST because they run the job or write a file.
+#: actions, the save and the stop are POST because they run the job, write a
+#: file, or end the process.
 ROUTES = {
     "state": frozenset({"GET"}),
     "collect": frozenset({"POST"}),
     "check": frozenset({"POST"}),
     "apply": frozenset({"POST"}),
     "config": frozenset({"POST"}),
+    "stop": frozenset({"POST"}),
 }
+
+#: The one endpoint whose answer is the last thing this server says. See
+#: ``_api()`` for the order it is said in, and ``api.stop_web()`` for the half
+#: that happens before it.
+STOP_ROUTE = "stop"
 
 #: The three buttons, in the order the page has them and in order of how much
 #: each one changes; see the table in :mod:`api`. The names are looked up on
@@ -269,12 +281,28 @@ class Handler(BaseHTTPRequestHandler):
             self._error(HTTPStatus.INTERNAL_SERVER_ERROR, "the action failed; see the log")
             return
 
+        if route == STOP_ROUTE:
+            # Nothing more will be answered on this connection, and a browser
+            # holding it open would be waiting on a socket that is going away.
+            self.close_connection = True
+
         self._json(HTTPStatus.OK, body, with_body=with_body)
+
+        if route == STOP_ROUTE:
+            # After the write, not before: serve() closes the listening socket
+            # the moment this is set, and the page has to be told what it asked
+            # for actually happened before it loses the way to ask anything.
+            log.info("the page asked for the server to stop")
+            self.server.stopping.set()
 
     def _act(self, route: str, payload: dict) -> dict:
         """Do what *route* names. Raises; ``_api()`` turns that into a status."""
         if route == "config":
             return api.save_config(payload, self.paths)
+        if route == STOP_ROUTE:
+            # Only the file half here. The server is stopped by _api() once this
+            # answer is on the wire, since a stopped server cannot send one.
+            return api.stop_web(self.paths)
 
         config = configuration.load(self.paths.config)
         if route == "state":
@@ -478,6 +506,11 @@ class Server(ThreadingHTTPServer):
     def __init__(self, address: tuple[str, int], handler):
         # Set before the socket is created: TCPServer builds it from this.
         self.address_family = socket.AF_INET6 if ":" in address[0] else socket.AF_INET
+        #: Set when this server should stop serving. Two things set it and they
+        #: mean the same thing: a signal, and the page's own stop button through
+        #: ``STOP_ROUTE``. ``serve()`` is what waits on it; a server built by
+        #: ``create_server()`` alone has one nobody is watching.
+        self.stopping = threading.Event()
         super().__init__(address, handler)
 
 
@@ -511,6 +544,11 @@ def serve(config: Config, *, ui_dir: Path | None = None, paths: api.Paths | None
     run that is already inside the pipeline finish writing what it started, then
     close the socket and return.
 
+    The page's own stop button is the third way in, and it means the same thing;
+    ``server.stopping`` is the one event all three set. It returns ``EXIT_OK``
+    however it was asked, which is what leaves a unit with ``Restart=on-failure``
+    stopped rather than started again a moment later.
+
     A connection that is merely open is dropped where it is. The threads serving
     them are daemons, so an idle tab holding one open cannot turn ``systemctl
     restart`` into a wait for ``CONNECTION_TIMEOUT``; what is worth waiting for
@@ -519,12 +557,12 @@ def serve(config: Config, *, ui_dir: Path | None = None, paths: api.Paths | None
     root = (ui_dir if ui_dir is not None else DEFAULT_UI_DIR).resolve()
     server = create_server(config, root, paths)
     log.info(
-        "serving %s on http://%s/ (SIGTERM or ctrl-c to stop)",
+        "serving %s on http://%s/ (SIGTERM, ctrl-c or the page's stop button)",
         root,
         _address(*server.server_address[:2]),
     )
 
-    stop = threading.Event()
+    stop = server.stopping
     for received in (signal.SIGINT, signal.SIGTERM):
         signal.signal(received, lambda number, frame: stop.set())
 

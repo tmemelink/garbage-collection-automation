@@ -12,6 +12,10 @@ things happen here, in order of how much they change:
 ``apply()``      also writes the to-dos      and the state file
 ===============  ==========================  ==================================
 
+Two more write config.toml rather than run anything: :func:`save_config`, which
+is the form, and :func:`stop_web`, which is the form's [web] enabled switched off
+on the page's behalf so the server it is served by may stop.
+
 Everything but ``state()`` is a real run of the pipeline, so all of them go
 through :func:`_locked`, which takes the same lock file ``run-job.sh`` holds -
 the cron run and a pressed button must never be inside the export at once.
@@ -54,6 +58,20 @@ LOG_ROOT = __name__.rsplit(".", 1)[0]
 #: pathological one, so the response cannot grow without bound.
 MAX_LOG_LINES = 500
 
+#: How much of config.toml the page is shown. The rendered file is under two
+#: kilobytes; this is the ceiling on one somebody has pasted a novel into.
+MAX_CONFIG_BYTES = 32 * 1024
+
+#: How many bullets a masked secret is written with, whatever its real length -
+#: the mask must not be a hint about that either.
+MASK_WIDTH = 8
+
+#: The tail a mask keeps, and the shortest secret that keeps one. Four of the
+#: twelve characters is what tells "the key I meant" from "some key"; four of
+#: six would be a head start on guessing the rest.
+TAIL = 4
+KEEPS_A_TAIL_FROM = 3 * TAIL
+
 
 class Busy(Exception):
     """Another run - the cron job, or another tab - is inside the export already."""
@@ -89,12 +107,20 @@ def state_payload(config: Config, paths: Paths) -> dict:
     """Everything the page needs to draw itself, without touching the network."""
     return {
         "config": _config_payload(config, paths),
+        "config_file": _config_file_payload(paths),
         "last_run": _last_run_payload(paths.state),
         "schedule": _schedule_payload(paths.cron),
     }
 
 
 def _config_payload(config: Config, paths: Paths) -> dict:
+    """Every key config.toml has, under the name the form gives it.
+
+    All of it, not the interesting half: the page is there to show what the
+    scheduled run is configured with, and a setting it does not draw is one
+    nobody knows about until they ssh in and read the file.
+    """
+    collection = config.collection
     todoist = config.export.todoist
     from_env = bool(os.environ.get(configuration.TOKEN_ENV_VAR, "").strip())
     key_from_env = bool(os.environ.get(configuration.API_KEY_ENV_VAR, "").strip())
@@ -102,13 +128,15 @@ def _config_payload(config: Config, paths: Paths) -> dict:
         "postcode": config.address.postcode,
         "house_number": config.address.house_number,
         "addition": config.address.addition,
-        "api_key": config.collection.api_key,
+        "api_key": collection.api_key,
         # Same story as token_from_environment below, for the schedule API's key.
         "api_key_from_environment": key_from_env,
-        "lookahead_days": config.collection.lookahead_days,
-        "due_time": config.collection.due_time.isoformat("minutes"),
-        "types": list(config.collection.types),
+        "lookahead_days": collection.lookahead_days,
+        "due_time": collection.due_time.isoformat("minutes"),
+        "types": list(collection.types),
         "known_types": [{"code": code, "label": label} for code, label in WASTE_TYPES.items()],
+        "timeout_seconds": collection.timeout_seconds,
+        "retries": collection.retries,
         "todoist_enabled": todoist.enabled,
         "todoist_token": todoist.token,
         "todoist_project": todoist.project,
@@ -116,10 +144,126 @@ def _config_payload(config: Config, paths: Paths) -> dict:
         # The page grays the token field out when this is true: the environment
         # wins over the file, so saving one from here would change nothing.
         "token_from_environment": from_env,
+        # [web] is the one section a save cannot make true of the running server:
+        # the socket was bound at startup. The page says so next to these three.
+        "web_enabled": config.web.enabled,
+        "web_host": config.web.host,
+        "web_port": config.web.port,
+        "logging_level": config.logging.level,
+        "known_levels": list(configuration.LOG_LEVELS),
         "config_path": str(paths.config),
         "state_path": str(paths.state),
         "writable": _writable(paths.config),
     }
+
+
+def _config_file_payload(paths: Paths) -> dict:
+    """config.toml as it is on disk, with the secrets in it blanked out.
+
+    The form is this file read through a validator; this is the file. It is what
+    answers "is the thing running from cron configured the way the page says it
+    is" without an ssh session, comments and hand edits and all.
+
+    A page served on loopback with no login is not somewhere to print a token
+    for no reason: the form has fields for both secrets and shows them behind a
+    reveal button, and that is the one place either appears. Here they are
+    masked - so this panel can be read, screenshotted and pasted into an issue.
+    """
+    try:
+        text = paths.config.read_text(encoding="utf-8")
+        modified = datetime.fromtimestamp(paths.config.stat().st_mtime)
+    except OSError as exc:
+        # Not fatal: everything else on the page still draws, and the panel says
+        # what happened where the file would have been.
+        log.warning("cannot read %s to show it: %s", paths.config, exc)
+        return _panel(paths, error=f"cannot read {paths.config}: {exc.strerror or exc}")
+
+    truncated = len(text) > MAX_CONFIG_BYTES
+    if truncated:
+        text = text[:MAX_CONFIG_BYTES] + "\n# ... the rest is not shown\n"
+
+    text, masked = _without_the_secrets(text, paths.config)
+    if text is None:
+        return _panel(
+            paths,
+            modified=modified,
+            error=(
+                f"{paths.config} is not valid TOML, so a secret in it cannot be told "
+                f"from a setting and none of it is shown here; read it on the machine itself"
+            ),
+        )
+    return _panel(paths, modified=modified, text=text, masked=masked, truncated=truncated)
+
+
+def _panel(
+    paths: Paths,
+    *,
+    text: str | None = None,
+    error: str | None = None,
+    masked: bool = False,
+    truncated: bool = False,
+    modified: datetime | None = None,
+) -> dict:
+    """One shape however it went, because the page draws one shape.
+
+    ``text`` and ``error`` are the two halves of the same answer: exactly one of
+    them is ever set, and the panel shows whichever it got.
+    """
+    return {
+        "path": str(paths.config),
+        "text": text,
+        "error": error,
+        "masked": masked,
+        "truncated": truncated,
+        "modified_at": None if modified is None else modified.isoformat(timespec="seconds"),
+        "writable": _writable(paths.config),
+    }
+
+
+def _without_the_secrets(text: str, path: Path) -> tuple[str | None, bool]:
+    """*text* with every secret the file itself holds replaced by a mask.
+
+    The values are taken from the parsed document rather than matched with a
+    pattern: what has to disappear is a secret wherever it appears, and a regex
+    over ``key = "value"`` would leave one that had been written a second time
+    somewhere unexpected.
+
+    That is also why a file too broken to parse comes back as ``None`` rather
+    than as itself: nothing here can then say which of it is a secret, and a
+    panel that is safe to screenshot except on the days the file is broken is
+    not a panel that is safe to screenshot.
+
+    Secrets that live in the environment are not in the file, so there is
+    nothing to mask; what is in the file is masked whether or not it is the
+    value being used.
+    """
+    try:
+        document = configuration.read_toml(path)
+    except ConfigError:
+        return None, False
+
+    secrets = (
+        document.get("collection", {}).get("api_key"),
+        document.get("export", {}).get("todoist", {}).get("token"),
+    )
+    masked = False
+    for secret in secrets:
+        if isinstance(secret, str) and secret.strip():
+            text = text.replace(secret, _mask(secret))
+            masked = True
+    return text, masked
+
+
+def _mask(secret: str) -> str:
+    """A stand-in of a fixed shape: enough tail to recognise, not enough to use.
+
+    The last few characters are what tells "the key I meant" from "some key",
+    which is the question this panel is read to answer. Anything short enough
+    that a tail would be a real part of it keeps none, and the width never
+    follows the length: how long a secret is, is something about the secret.
+    """
+    keep = TAIL if len(secret) >= KEEPS_A_TAIL_FROM else 0
+    return "\u2022" * MASK_WIDTH + (secret[-keep:] if keep else "")
 
 
 def _writable(path: Path) -> bool:
@@ -212,9 +356,13 @@ def apply(config: Config, paths: Paths) -> dict:
 
 # --- saving the form -----------------------------------------------------------------
 
-#: What the form may change. Everything else in config.toml - the query limits,
-#: [web], [logging] - is left exactly as the file has it, so a save through the
-#: page never silently drops a key the page does not know about.
+#: What the form may change: every key config.toml has, since the page draws
+#: every one of them. A save still overlays only the fields it was sent, so a
+#: form that posts three of these leaves the rest of the file exactly as it is.
+#:
+#: The schedule is deliberately not here. It lives in root's crontab, and a
+#: service user that could rewrite one could run anything as anyone; the page
+#: shows that line and says who may change it.
 FORM_FIELDS = frozenset(
     {
         "postcode",
@@ -224,10 +372,16 @@ FORM_FIELDS = frozenset(
         "lookahead_days",
         "due_time",
         "types",
+        "timeout_seconds",
+        "retries",
         "todoist_enabled",
         "todoist_token",
         "todoist_project",
         "remind_days_before",
+        "web_enabled",
+        "web_host",
+        "web_port",
+        "logging_level",
     }
 )
 
@@ -274,7 +428,14 @@ def save_config(payload: dict, paths: Paths) -> dict:
         raise ApiError(str(exc)) from exc
 
     log.info("configuration saved to %s from the web interface", paths.config)
-    return {"config": _config_payload(config, paths), "saved": True}
+    return {
+        "config": _config_payload(config, paths),
+        # The panel showing the file has to be redrawn from the file that is
+        # there now, not from the one the page loaded: a save re-renders the
+        # whole document, so its comments and its layout may both have moved.
+        "config_file": _config_file_payload(paths),
+        "saved": True,
+    }
 
 
 def _secret_to_write(section: dict, payload: dict, *, field: str, key: str, env_var: str) -> str:
@@ -303,6 +464,8 @@ def _overlay(document: dict, payload: dict) -> None:
     address = document.setdefault("address", {})
     collection = document.setdefault("collection", {})
     todoist = document.setdefault("export", {}).setdefault("todoist", {})
+    web = document.setdefault("web", {})
+    logging_ = document.setdefault("logging", {})
 
     for field, section, key in (
         ("postcode", address, "postcode"),
@@ -312,9 +475,15 @@ def _overlay(document: dict, payload: dict) -> None:
         ("lookahead_days", collection, "lookahead_days"),
         ("due_time", collection, "due_time"),
         ("types", collection, "types"),
+        ("timeout_seconds", collection, "timeout_seconds"),
+        ("retries", collection, "retries"),
         ("todoist_enabled", todoist, "enabled"),
         ("todoist_project", todoist, "project"),
         ("remind_days_before", todoist, "remind_days_before"),
+        ("web_enabled", web, "enabled"),
+        ("web_host", web, "host"),
+        ("web_port", web, "port"),
+        ("logging_level", logging_, "level"),
     ):
         if field in payload:
             section[key] = payload[field]
@@ -324,6 +493,35 @@ def _overlay(document: dict, payload: dict) -> None:
     # The token written is _secret_to_write()'s answer, so keep the two the same.
     if "todoist_token" in payload:
         todoist["token"] = payload["todoist_token"]
+
+
+# --- switching the page off ----------------------------------------------------------
+
+
+def stop_web(paths: Paths) -> dict:
+    """Switch ``[web] enabled`` off, and report that the server may now stop.
+
+    The page is a thing you open twice: once to see that the job is configured
+    the way you meant, and once more the day something looks wrong. The rest of
+    the year it is a process holding a port, so this is the button that puts it
+    away without an ssh session.
+
+    Two halves, and the order matters. The file is written first, through the
+    same save the form uses, so a write that is refused leaves the server up and
+    the page able to say why. :mod:`web` does the second half once this has
+    answered: it stops serving and the process exits 0, which is not a failure,
+    so ``Restart=on-failure`` leaves it stopped. The file is what keeps it that
+    way across a reboot - the unit is still enabled and still starts, reads this
+    key, says so and exits.
+
+    Getting the page back is therefore an edit and a start on the machine
+    itself. The answer carries the configuration that was just written, path
+    included, because the page has to be able to say where - it is about to lose
+    the server it would otherwise ask.
+    """
+    saved = save_config({"web_enabled": False}, paths)
+    log.info("[web] enabled switched off in %s from the page; stopping", paths.config)
+    return {**saved, "stopping": True}
 
 
 # --- turning a JobResult into what the page draws ------------------------------------

@@ -106,6 +106,26 @@
 
       </section>
 
+      <!--
+        The file the scheduled run reads, as it is on disk. The form above is
+        this file seen through a validator; this is what an ssh session would
+        show, minus the secrets - api.py masks those before they are sent.
+      -->
+      <details class="panel source" id="config_file" open>
+        <summary class="source__header">
+          <svg class="source__icon" viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8l-5-5Z"/>
+            <path d="M14 3v5h5M9 13h6M9 17h6"/>
+          </svg>
+          <span class="source__title">config.toml</span>
+          <span class="source__meta" id="config_file_meta"></span>
+          <svg class="source__chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="m6 15 6-6 6 6"/></svg>
+        </summary>
+        <div class="source__body">
+          <pre class="source__text" id="config_file_text"></pre>
+        </div>
+      </details>
+
     </div>
 
     <!-- The configuration, in the order config.toml has it. -->
@@ -158,6 +178,19 @@
               file, so the key is shown but not saved from here.
             </span>
           </p>
+
+          <div class="field-row">
+            <p class="field">
+              <label class="field__label" for="timeout_seconds">Timeout (seconds)</label>
+              <input class="input" id="timeout_seconds" name="timeout_seconds"
+                     type="number" min="1" max="60" value="15">
+            </p>
+            <p class="field">
+              <label class="field__label" for="retries">Retries</label>
+              <input class="input" id="retries" name="retries" type="number" min="0" max="3" value="1">
+            </p>
+          </div>
+          <span class="field__hint">Be a polite guest on someone else&rsquo;s server.</span>
         </fieldset>
 
         <fieldset class="config__group">
@@ -221,6 +254,55 @@
           </div>
         </fieldset>
 
+        <fieldset class="config__group">
+          <legend class="config__legend">Web interface</legend>
+
+          <label class="switch switch--inline">
+            <span class="switch__label">Serve this page</span>
+            <input type="checkbox" id="web_enabled" name="web_enabled">
+            <span class="switch__track" aria-hidden="true"></span>
+          </label>
+
+          <div class="field-row">
+            <p class="field">
+              <label class="field__label" for="web_host">Host</label>
+              <input class="input input--mono" id="web_host" name="web_host" value=""
+                     spellcheck="false" autocomplete="off">
+            </p>
+            <p class="field">
+              <label class="field__label" for="web_port">Port</label>
+              <input class="input" id="web_port" name="web_port" type="number" min="1024" max="65535" value="8080">
+            </p>
+          </div>
+          <span class="field__hint">
+            A loopback address only &ndash; the page has no login. Saving these
+            three changes the file, not the server that is already listening:
+            that one keeps the socket it bound until it is restarted.
+          </span>
+
+          <button type="button" class="button button--red button--block" id="stop">
+            Switch off and stop the server
+          </button>
+          <span class="field__hint">
+            For when you have seen what you came to see. It writes
+            <code>enabled = false</code> and then stops, so a reboot does not
+            bring it back.
+          </span>
+        </fieldset>
+
+        <fieldset class="config__group">
+          <legend class="config__legend">Logging</legend>
+          <p class="field">
+            <label class="field__label" for="logging_level">Level</label>
+            <!-- The options come from configuration.LOG_LEVELS; app.js fills them. -->
+            <select class="input" id="logging_level" name="logging_level"></select>
+            <span class="field__hint">
+              What the scheduled run writes to its log. The console below always
+              shows a button press, however quiet this is.
+            </span>
+          </p>
+        </fieldset>
+
         <p class="field">
           <label class="field__label" for="cron">Schedule (cron)</label>
           <input class="input input--mono" id="cron" value="" spellcheck="false" readonly disabled>
@@ -269,6 +351,49 @@
 
 </main>
 
+<!--
+  What a save and a stop ask before they happen. Both rewrite the file the cron
+  job reads on a machine nobody is watching, so neither is a single click. The
+  buttons are type="button" and closed from app.js rather than method="dialog":
+  the page is served under a Content-Security-Policy with form-action, and a
+  dialog form is not worth finding out which browsers count that as a submit.
+-->
+<dialog class="modal" id="confirm">
+  <h2 class="modal__title" id="confirm_title"></h2>
+  <p class="modal__text" id="confirm_text"></p>
+  <ul class="modal__list" id="confirm_list"></ul>
+  <p class="modal__note" id="confirm_note" hidden></p>
+  <div class="modal__actions">
+    <button type="button" class="button" id="confirm_cancel">Cancel</button>
+    <button type="button" class="button button--filled" id="confirm_ok">Save</button>
+  </div>
+</dialog>
+
+<!--
+  Shown in place of everything else once the server has been asked to stop. It
+  is the last thing this page can say: the server that would answer anything
+  further is gone by the time this is on screen.
+-->
+<section class="farewell" id="farewell" hidden>
+  <svg class="farewell__mark" viewBox="0 0 24 24" aria-hidden="true">
+    <path d="M18.4 5.6a9 9 0 1 1-12.8 0M12 3v9"/>
+  </svg>
+  <h2 class="farewell__title">The page has been switched off</h2>
+  <p class="farewell__text">
+    <code id="farewell_path"></code> now has <code>enabled = false</code> under
+    <code>[web]</code>, and the server has stopped. A reboot will not bring it
+    back &ndash; the service starts, reads that key and exits.
+  </p>
+  <p class="farewell__text">
+    To serve it again, set that key to <code>true</code> and then start the
+    service: <code>systemctl start garbage-collection-automation-web</code>
+  </p>
+  <p class="farewell__text">
+    The job itself is untouched: cron still runs it on its schedule, and nothing
+    about the to-dos depends on this page being served.
+  </p>
+</section>
+
 <!-- The shapes app.js clones. Kept here so the markup lives with the markup. -->
 
 <template id="row-template">
@@ -293,6 +418,10 @@
     <span class="switch__track" aria-hidden="true"></span>
     <span class="switch__label"></span>
   </label>
+</template>
+
+<template id="change-template">
+  <li><span class="modal__field"></span> <span class="modal__was"></span> <span class="modal__now"></span></li>
 </template>
 
 <template id="log-template">

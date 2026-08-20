@@ -76,6 +76,162 @@ def test_the_state_payload_carries_the_configuration_the_form_shows(paths):
     assert payload["config"]["writable"] is True
 
 
+def test_every_setting_the_file_has_is_on_the_page(paths):
+    """The page is there to show what the headless run is configured with.
+
+    A key the form has no name for is one nobody sees without an ssh session, so
+    what the renderer writes and what the payload carries are checked against
+    each other rather than kept in step by hand.
+    """
+    api.save_config({}, paths)  # render() writes every section, defaults included
+    written = configuration.read_toml(paths.config)
+    shown = api.state_payload(configuration.load(paths.config), paths)["config"]
+
+    missing = [
+        f"[{section}] {key}"
+        for section, keys in _flatten(written).items()
+        for key in keys
+        if not any(name in shown for name in _payload_names(section, key))
+    ]
+    assert not missing, f"config.toml keys the page never draws: {', '.join(missing)}"
+
+
+def _flatten(document: dict, prefix: str = "") -> dict[str, list[str]]:
+    """``{"collection": ["api_key", ...], "export.todoist": [...]}`` out of a document."""
+    sections: dict[str, list[str]] = {}
+    for key, value in document.items():
+        if isinstance(value, dict):
+            sections |= _flatten(value, f"{prefix}{key}.")
+        else:
+            sections.setdefault(prefix.rstrip("."), []).append(key)
+    return sections
+
+
+def _payload_names(section: str, key: str) -> tuple[str, ...]:
+    """What the form could plausibly be calling ``[section] key``."""
+    return (key, f"{section}_{key}", f"{section.split('.')[-1]}_{key}")
+
+
+def test_the_form_may_write_every_setting_it_is_shown(paths):
+    """Showing a key read-only that the file lets you change is a page to ssh past."""
+    api.save_config({}, paths)
+    written = configuration.read_toml(paths.config)
+
+    unwritable = [
+        f"[{section}] {key}"
+        for section, keys in _flatten(written).items()
+        for key in keys
+        if not set(_payload_names(section, key)) & api.FORM_FIELDS
+    ]
+    assert not unwritable, f"config.toml keys the form cannot save: {', '.join(unwritable)}"
+
+
+def test_the_settings_the_form_never_used_to_reach_are_reachable_now(paths):
+    payload = api.state_payload(configuration.load(paths.config), paths)["config"]
+
+    assert payload["timeout_seconds"] == 15
+    assert payload["retries"] == 1
+    assert payload["web_enabled"] is False
+    assert payload["web_host"] == "127.0.0.1"
+    assert payload["web_port"] == 8080
+    assert payload["logging_level"] == "INFO"
+    assert payload["known_levels"] == list(configuration.LOG_LEVELS)
+
+
+# --- config.toml, as the panel shows it -----------------------------------------------
+
+
+def test_the_file_is_shown_as_it_is_on_disk(paths):
+    """Comments and all: the panel is the file, not a second rendering of it."""
+    paths.config.write_text(MINIMAL_CONFIG + "\n# a note somebody left here\n")
+
+    shown = api.state_payload(configuration.load(paths.config), paths)["config_file"]
+
+    assert shown["text"] == paths.config.read_text()
+    assert "# a note somebody left here" in shown["text"]
+    assert shown["path"] == str(paths.config)
+    assert shown["error"] is None
+    assert shown["masked"] is False, "there is no secret in this one to mask"
+    assert shown["writable"] is True
+
+
+def test_neither_secret_in_the_file_is_in_the_panel(paths):
+    paths.config.write_text(
+        MINIMAL_CONFIG.replace(
+            "[export.todoist]", '[export.todoist]\ntoken = "todoist-secret-value"'
+        ).replace("[collection]", '[collection]\napi_key = "afvalwijzer-secret-value"')
+    )
+
+    shown = api.state_payload(configuration.load(paths.config), paths)["config_file"]
+
+    assert "todoist-secret-value" not in shown["text"]
+    assert "afvalwijzer-secret-value" not in shown["text"]
+    assert shown["masked"] is True
+    # Enough of the tail to tell the key you meant from some other key.
+    assert "\u2022" * api.MASK_WIDTH + "alue" in shown["text"]
+
+
+def test_a_secret_written_twice_is_masked_both_times(paths):
+    """Why the value is looked for rather than the key: a file is not a schema."""
+    paths.config.write_text(
+        MINIMAL_CONFIG.replace(
+            "[collection]", '[collection]\napi_key = "shared-secret"\n# also used as: shared-secret'
+        )
+    )
+
+    shown = api.state_payload(configuration.load(paths.config), paths)["config_file"]
+
+    assert "shared-secret" not in shown["text"]
+
+
+def test_a_short_secret_keeps_none_of_itself(paths):
+    """A tail of a short value is a real part of it, which is not a mask."""
+    assert api._mask("abcdefgh") == "\u2022" * api.MASK_WIDTH
+    assert api._mask("a-secret-long-enough-to-recognise").endswith("nise")
+
+
+def test_the_mask_does_not_say_how_long_the_secret_is(paths):
+    short, long = api._mask("0123456789ab"), api._mask("0123456789ab" * 8)
+
+    assert len(short) == len(long)
+
+
+def test_a_file_too_broken_to_parse_is_not_shown_at_all(paths):
+    """Nothing can say which of an unparsable file is a secret, so none of it goes out."""
+    paths.config.write_text('[collection]\napi_key = "still-a-secret"\nthis is not toml\n')
+
+    shown = api._config_file_payload(paths)
+
+    assert shown["text"] is None
+    assert "still-a-secret" not in str(shown)
+    assert "not valid TOML" in shown["error"]
+
+
+def test_a_file_that_cannot_be_read_leaves_the_rest_of_the_page_standing(paths):
+    shown = api._config_file_payload(api.Paths(config=paths.config.parent, state=paths.state))
+
+    assert shown["text"] is None
+    assert shown["error"].startswith("cannot read ")
+
+
+def test_a_file_nobody_should_have_to_scroll_is_cut_short(paths, monkeypatch):
+    monkeypatch.setattr(api, "MAX_CONFIG_BYTES", 120)
+
+    shown = api._config_file_payload(paths)
+
+    assert shown["truncated"] is True
+    assert shown["text"].endswith("# ... the rest is not shown\n")
+
+
+def test_the_panel_says_when_the_file_was_last_written(paths):
+    saved = api.save_config({"lookahead_days": 45}, paths)
+
+    assert saved["config_file"]["modified_at"] is not None
+    assert "lookahead_days = 45" in saved["config_file"]["text"], (
+        "a save answers with the file it just wrote, not the one the page loaded"
+    )
+
+
 def test_the_page_is_told_every_waste_type_it_could_offer(paths):
     """The switches are built from this; a code the file does not use still needs one."""
     payload = api.state_payload(configuration.load(paths.config), paths)
@@ -455,7 +611,8 @@ def test_the_lock_is_released_when_the_run_fails(paths):
 # --- saving the form ------------------------------------------------------------------
 
 
-def test_a_save_writes_the_form_and_leaves_the_rest_of_the_file_alone(paths):
+def test_a_save_writes_the_fields_it_was_sent_and_leaves_the_others_alone(paths):
+    """The form may reach every key; a save still only moves the ones it carried."""
     paths.config.write_text(MINIMAL_CONFIG + "\n[web]\nenabled = true\nport = 9001\n")
 
     api.save_config({"lookahead_days": 45, "todoist_project": "Huis"}, paths)
@@ -463,8 +620,33 @@ def test_a_save_writes_the_form_and_leaves_the_rest_of_the_file_alone(paths):
     after = configuration.load(paths.config)
     assert after.collection.lookahead_days == 45
     assert after.export.todoist.project == "Huis"
-    assert after.web.enabled is True, "[web] is not the form's to change"
+    assert after.web.enabled is True, "not sent, so not changed"
     assert after.web.port == 9001
+
+
+def test_the_sections_the_form_never_used_to_have_are_saved_too(paths):
+    api.save_config(
+        {
+            "timeout_seconds": 30,
+            "retries": 3,
+            "web_enabled": True,
+            "web_host": "::1",
+            "web_port": 9100,
+            "logging_level": "WARNING",
+        },
+        paths,
+    )
+
+    after = configuration.load(paths.config)
+    assert (after.collection.timeout_seconds, after.collection.retries) == (30, 3)
+    assert (after.web.enabled, after.web.host, after.web.port) == (True, "::1", 9100)
+    assert after.logging.level == "WARNING"
+
+
+def test_an_address_the_page_must_not_be_served_on_is_refused_here_too(paths):
+    """[web] host is the form's to change, which is exactly why it is validated."""
+    with pytest.raises(api.ApiError, match="not a loopback address"):
+        api.save_config({"web_host": "0.0.0.0"}, paths)
 
 
 def test_a_value_the_file_would_refuse_is_refused_in_the_same_words(paths):
@@ -542,6 +724,42 @@ def test_a_file_that_cannot_be_written_is_reported_rather_than_half_saved(paths)
 
     with pytest.raises(api.ApiError, match="cannot write"):
         api.save_config({"lookahead_days": 45}, paths)
+
+
+# --- switching the page off -----------------------------------------------------------
+
+
+def test_stopping_switches_the_page_off_in_the_file(paths):
+    """The kill is web.py's half; this half is what keeps it off after a reboot."""
+    paths.config.write_text(MINIMAL_CONFIG + "\n[web]\nenabled = true\nport = 9001\n")
+
+    payload = api.stop_web(paths)
+
+    assert payload["stopping"] is True
+    assert payload["config"]["web_enabled"] is False
+    assert configuration.load(paths.config).web.enabled is False
+
+
+def test_stopping_changes_nothing_else_about_the_configuration(paths):
+    paths.config.write_text(MINIMAL_CONFIG + "\n[web]\nenabled = true\nport = 9001\n")
+
+    api.stop_web(paths)
+
+    after = configuration.load(paths.config)
+    assert after.web.port == 9001, "the address it was served on is still the file's"
+    assert after.address.postcode == "1234AB"
+    assert after.collection.lookahead_days == 30
+
+
+def test_a_stop_that_cannot_be_written_down_is_refused(paths):
+    """Killing the server without the file would bring the page back at the next boot."""
+    paths.config.write_text(MINIMAL_CONFIG + "\n[web]\nenabled = true\n")
+    paths.config.chmod(0o444)
+
+    with pytest.raises(api.ApiError, match="cannot write"):
+        api.stop_web(paths)
+
+    assert configuration.load(paths.config).web.enabled is True
 
 
 def test_a_save_and_then_a_run_use_the_same_configuration(paths):

@@ -241,6 +241,15 @@ svg {
 }
 .button--filled:hover { background: #2f6fd8; border-color: #2f6fd8; }
 
+.button--red {
+  color: var(--red-bright);
+  border-color: color-mix(in srgb, var(--red) 50%, transparent);
+}
+.button--red:hover {
+  background: color-mix(in srgb, var(--red) 16%, var(--panel-raised));
+  border-color: color-mix(in srgb, var(--red) 70%, transparent);
+}
+
 .button--block { width: 100%; padding: 11px 18px; }
 
 .icon-button {
@@ -545,6 +554,9 @@ select.input { appearance: none; padding-right: 34px; cursor: pointer;
 
 .types { display: flex; flex-wrap: wrap; gap: 10px; }
 
+/* A button inside a fieldset of fields, rather than at the end of the form. */
+.config__group .button--block { margin-top: 4px; }
+
 /* What the server said no to - its own words, in the form that asked. */
 .notice {
   padding: 10px 12px;
@@ -643,6 +655,178 @@ select.input { appearance: none; padding-right: 34px; cursor: pointer;
 .log-level--warning { color: #fbbf24; }
 .log-level--error { color: var(--red-bright); }
 .log-level--debug { color: var(--text-dim); }
+
+
+/* --------------------------------------------------- config.toml, as on disk */
+/*
+ * Shares the console's shape - a <details> that collapses without any script -
+ * because it is the same kind of thing: a block of text the page shows rather
+ * than interprets.
+ */
+
+.source { padding: 0; overflow: hidden; }
+
+.source__header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 14px 20px;
+  cursor: pointer;
+  list-style: none;
+  font-weight: 600;
+}
+
+.source__header::-webkit-details-marker { display: none; }
+.source__header:hover { background: #151b24; }
+
+.source__icon { width: 18px; height: 18px; color: var(--text-dim); }
+.source__title { font-family: var(--font-mono); font-size: 14px; }
+
+.source__meta {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 400;
+  font-size: 13px;
+  font-style: italic;
+  color: var(--text-faint);
+}
+
+.source__chevron {
+  width: 18px;
+  height: 18px;
+  flex: none;
+  color: var(--text-dim);
+  transition: transform 140ms ease;
+}
+
+.source:not([open]) .source__chevron { transform: rotate(180deg); }
+
+.source__body {
+  border-top: 1px solid var(--line-soft);
+  background: #070a0e;
+  /* Most of the file at once, and a scrollbar for the rest: it is next to a
+     table that grows with the collection round, and must not outgrow it. */
+  max-height: 560px;
+  overflow: auto;
+}
+
+.source__text {
+  margin: 0;
+  padding: 14px 20px;
+  font-family: var(--font-mono);
+  font-size: 13px;
+  line-height: 1.65;
+  color: var(--text);
+  /* A TOML file is written in lines; wrapping one is worse than a scrollbar. */
+  white-space: pre;
+}
+
+
+/* ------------------------------------------------------------------- dialog */
+
+.modal {
+  width: min(520px, calc(100vw - 32px));
+  padding: 22px 24px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--panel);
+  color: var(--text);
+}
+
+.modal::backdrop { background: rgb(3 6 10 / 72%); }
+
+.modal__title { font-size: 19px; font-weight: 650; letter-spacing: -0.01em; }
+
+.modal__text {
+  margin-top: 8px;
+  color: var(--text-dim);
+  font-size: 14px;
+  line-height: 1.55;
+}
+
+.modal__text code, .field__hint code {
+  padding: 1px 5px;
+  border-radius: 4px;
+  background: var(--panel-raised);
+  font-family: var(--font-mono);
+  /* The hints around it are set in italics; a key out of the file is not. */
+  font-style: normal;
+  font-size: 0.92em;
+  color: var(--text);
+}
+
+.modal__list {
+  margin: 14px 0 0;
+  padding: 12px 14px;
+  border: 1px solid var(--line-soft);
+  border-radius: var(--radius-sm);
+  background: #070a0e;
+  list-style: none;
+  display: grid;
+  gap: 7px;
+  max-height: 220px;
+  overflow: auto;
+  font-size: 13.5px;
+}
+
+.modal__list:empty { display: none; }
+
+.modal__field { color: var(--text-dim); }
+.modal__was { color: var(--text-faint); text-decoration: line-through; }
+.modal__now { color: var(--text); font-weight: 600; }
+
+.modal__note {
+  margin-top: 14px;
+  padding: 10px 12px;
+  border: 1px solid color-mix(in srgb, var(--amber) 40%, transparent);
+  border-radius: var(--radius-sm);
+  background: color-mix(in srgb, var(--amber) 10%, transparent);
+  color: #fbbf24;
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.modal__actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+  margin-top: 20px;
+}
+
+
+/* ---------------------------------------------------------------- switched off */
+
+.farewell {
+  max-width: 640px;
+  margin: 12vh auto;
+  padding: 0 20px;
+  text-align: center;
+  display: grid;
+  justify-items: center;
+  gap: 12px;
+}
+
+.farewell__mark { width: 40px; height: 40px; color: var(--text-faint); }
+.farewell__title { font-size: 23px; font-weight: 650; letter-spacing: -0.01em; }
+
+.farewell__text {
+  color: var(--text-dim);
+  font-size: 14.5px;
+  line-height: 1.6;
+}
+
+.farewell__text code {
+  display: inline-block;
+  padding: 2px 7px;
+  border-radius: 4px;
+  background: var(--panel);
+  font-family: var(--font-mono);
+  font-size: 13px;
+  color: var(--text);
+}
 
 
 /* ------------------------------------------------------------- narrow view */

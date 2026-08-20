@@ -316,7 +316,9 @@ so persistent changes belong in the repository template.
 ### Web interface
 
 A single local page showing what the last run found, the delta it would apply,
-and the configuration. It is off until asked for — in `config.toml`:
+and the configuration the headless run reads — every key of it, in a form that
+writes it back, next to `config.toml` itself as it is on disk. It is off until
+asked for — in `config.toml`:
 
 ```toml
 [web]
@@ -360,20 +362,61 @@ The buttons run the same pipeline the weekly job runs, and differ only in how
 far they are allowed to get:
 
 
-| Button               | Endpoint            | Reads              | Writes                            |
-| -------------------- | ------------------- | ------------------ | --------------------------------- |
-| *Collect now*        | `POST /api/collect` | mijnafvalwijzer.nl | nothing — a dry run               |
-| *Check Todoist*      | `POST /api/check`   | also Todoist       | nothing                           |
-| *Apply delta*        | `POST /api/apply`   | also Todoist       | the to-dos, and `state.json`      |
-| *Save configuration* | `POST /api/config`  | the form           | `config.toml`, rewritten in place |
+| Button                        | Endpoint            | Reads              | Writes                            |
+| ----------------------------- | ------------------- | ------------------ | --------------------------------- |
+| *Collect now*                 | `POST /api/collect` | mijnafvalwijzer.nl | nothing — a dry run               |
+| *Check Todoist*               | `POST /api/check`   | also Todoist       | nothing                           |
+| *Apply delta*                 | `POST /api/apply`   | also Todoist       | the to-dos, and `state.json`      |
+| *Save configuration*          | `POST /api/config`  | the form           | `config.toml`, rewritten in place |
+| *Switch off and stop*         | `POST /api/stop`    | the form           | `[web] enabled = false`, then ends the process |
 
 
-`GET /api/state` returns the configuration, the last run and the cron line
-without touching the network — it is what the page draws itself from.
+`GET /api/state` returns the configuration, the file it came from, the last run
+and the cron line without touching the network — it is what the page draws
+itself from.
 
-All four actions take the same lock the cron job takes; a lock they cannot have
-is answered **409 immediately, never a wait**. The schedule is shown but never
-written — change it over ssh.
+The three run actions take the same lock the cron job takes; a lock they cannot
+have is answered **409 immediately, never a wait**. The schedule is shown but
+never written — change it over ssh.
+
+#### The configuration on the page
+
+The form covers every key in the table under [Configuration](#configuration) —
+`[web]` and `[logging]` included — and saving asks first, listing what is about
+to change. The whole document is re-rendered on a save, so a comment you added
+by hand is not written back; the annotations in the file are the ones
+`configuration.render()` writes.
+
+`[web]` is the one section a save cannot make true of the server answering the
+request: the address and port were bound at startup, so those three take effect
+at the next `systemctl restart garbage-collection-automation-web`.
+
+Below the table the page shows `config.toml` as it actually is on disk, comments
+and hand edits and all, with both secrets replaced by `••••••••` and the last
+few characters — enough to tell one key from another, and safe to screenshot.
+The form's own two fields still hold the real values behind a reveal button;
+that is the one place either appears. A file too broken to parse is not shown at
+all, since nothing can then tell a secret in it from a setting.
+
+#### Switching it off
+
+*Switch off and stop* is the page putting itself away: it writes
+`[web] enabled = false` and then ends the process, in that order, so a write
+that is refused leaves the server up and able to say why. The exit is `0`, which
+is not a failure, so `Restart=on-failure` leaves it stopped; the key in the file
+is what keeps it stopped across a reboot, where the unit still starts, reads it
+and exits.
+
+Getting it back is an edit and a start on the machine itself:
+
+```sh
+sed -i '/^\[web\]/,/^\[/ s/^enabled = false/enabled = true/' \
+    /etc/garbage-collection-automation/config.toml
+systemctl start garbage-collection-automation-web
+```
+
+The job is untouched either way: cron still runs it, and nothing about the
+to-dos depends on the page being served.
 
 ### Exit codes
 

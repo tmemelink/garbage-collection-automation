@@ -22,7 +22,7 @@ import httpx
 import pytest
 
 import garbage_collection_automation as gca
-from garbage_collection_automation import api, data_collection, data_processing, web
+from garbage_collection_automation import api, configuration, data_collection, data_processing, web
 from garbage_collection_automation.configuration import WebConfig
 
 from .conftest import REPO_ROOT, make_config
@@ -59,20 +59,25 @@ def paths(tmp_path):
 
 
 @pytest.fixture
-def client(ui_dir, paths):
-    """A running server, and a client pointed at it."""
+def server(ui_dir, paths):
+    """A running server. Its ``stopping`` event is what a stop request sets."""
     server = web.create_server(config(), ui_dir, paths)
     thread = threading.Thread(target=server.serve_forever, name="test-http", daemon=True)
     thread.start()
-
-    host, port = server.server_address[:2]
     try:
-        with httpx.Client(base_url=f"http://{host}:{port}", timeout=5) as client:
-            yield client
+        yield server
     finally:
         server.shutdown()
         thread.join(timeout=5)
         server.server_close()
+
+
+@pytest.fixture
+def client(server):
+    """A client pointed at it."""
+    host, port = server.server_address[:2]
+    with httpx.Client(base_url=f"http://{host}:{port}", timeout=5) as client:
+        yield client
 
 
 # --- what it serves -------------------------------------------------------------------
@@ -381,6 +386,31 @@ def test_the_page_can_ask_what_to_draw_itself_from(client):
     assert response.status_code == 200
     assert response.headers["content-type"] == "application/json"
     assert response.json()["config"]["postcode"] == "1234AB"
+    assert response.json()["config_file"]["text"], "the panel showing the file would be empty"
+
+
+def test_the_page_has_a_field_for_every_setting_the_server_will_save(client):
+    """The markup and api.FORM_FIELDS agreeing about names, checked rather than assumed.
+
+    A field the server accepts and the page has no input for is a setting that
+    is only reachable by hand - which is the thing this page exists to avoid.
+    """
+    markup = (web.DEFAULT_UI_DIR / web.INDEX).read_text()
+
+    missing = [field for field in sorted(api.FORM_FIELDS) if f'id="{field}"' not in markup]
+
+    assert not missing, f"the page has no field for: {', '.join(missing)}"
+
+
+def test_every_field_the_page_saves_has_a_name_to_confirm_it_by(client):
+    """The save asks before it writes, and lists what changes; an unnamed field
+    would be listed as "undefined" in the one dialog nobody should have to guess at."""
+    script = (web.DEFAULT_UI_DIR / "static" / "app.js").read_text()
+    labels = script.split("const FIELD_LABELS = {")[1].split("};")[0]
+
+    unnamed = [field for field in sorted(api.FORM_FIELDS) if f"{field}:" not in labels]
+
+    assert not unnamed, f"the confirmation cannot name: {', '.join(unnamed)}"
 
 
 def test_a_button_runs_the_job_and_answers_with_what_it_found(client):
@@ -414,7 +444,7 @@ def test_an_endpoint_that_does_not_exist_says_so_in_json(client):
     assert "error" in response.json()
 
 
-@pytest.mark.parametrize("route", ["collect", "check", "apply", "config"])
+@pytest.mark.parametrize("route", ["collect", "check", "apply", "config", "stop"])
 def test_nothing_that_changes_anything_can_be_reached_with_a_get(client, route):
     """A link, a redirect or a prefetch must never be able to set the job going."""
     response = client.get(f"/api/{route}")
@@ -474,6 +504,106 @@ def test_a_job_that_raises_becomes_a_sentence_rather_than_a_traceback(client, mo
     assert response.status_code == 500
     assert "the token was made of cheese" not in response.text, "internals stay in the log"
     assert "error" in response.json()
+
+
+# --- the stop button ------------------------------------------------------------------
+
+
+def test_the_stop_endpoint_answers_before_it_stops_anything(client, paths):
+    """The order the page depends on: it has to be told, and then lose the server.
+
+    The other way round leaves a page that cannot say whether the thing it just
+    asked for happened, on a machine whose only other way in is ssh.
+    """
+    paths.config.write_text(MINIMAL_CONFIG + "\n[web]\nenabled = true\n")
+
+    response = client.post("/api/stop", json={})
+
+    assert response.status_code == 200
+    assert response.json()["stopping"] is True
+    assert response.json()["config"]["web_enabled"] is False
+
+
+def test_the_stop_endpoint_asks_the_server_to_stop(client, paths, server):
+    paths.config.write_text(MINIMAL_CONFIG + "\n[web]\nenabled = true\n")
+    assert not server.stopping.is_set()
+
+    client.post("/api/stop", json={})
+
+    assert server.stopping.is_set(), "serve() would have kept serving"
+
+
+def test_a_refused_stop_leaves_the_server_serving(client, paths, server):
+    """No file written, no server stopped: the page would come back at the next boot."""
+    paths.config.chmod(0o444)
+
+    response = client.post("/api/stop", json={})
+
+    assert response.status_code == 400
+    assert "cannot write" in response.json()["error"]
+    assert not server.stopping.is_set()
+    assert client.get("/healthz").status_code == 200
+
+
+def test_the_page_is_not_stopped_by_a_link_from_another_site(client, paths):
+    """It is a POST and it is checked like the rest; neither is an accident."""
+    paths.config.write_text(MINIMAL_CONFIG + "\n[web]\nenabled = true\n")
+
+    response = client.post("/api/stop", json={}, headers={"Origin": "https://evil.example"})
+
+    assert response.status_code == 403
+    assert configuration.load(paths.config).web.enabled is True
+
+
+def test_the_stop_button_ends_the_process_the_way_a_signal_does(tmp_path, write_config):
+    """The whole thing, in the layout the unit runs: a request in, an exit 0 out.
+
+    Exit 0 is the load-bearing part. The unit restarts on failure, so a stop
+    that looked like one would put the server straight back on the port it was
+    just asked to give up.
+    """
+    port = free_port()
+    config_file = write_config(
+        f'[address]\npostcode = "1234AB"\nhouse_number = "56"\n'
+        f"[web]\nenabled = true\nport = {port}\n"
+    )
+
+    process = subprocess.Popen(
+        [sys.executable, "-m", "garbage_collection_automation.web", "--config", str(config_file)],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+    )
+    try:
+        with httpx.Client(base_url=f"http://127.0.0.1:{port}", timeout=5) as caller:
+            deadline = time.monotonic() + 10
+            while True:
+                assert process.poll() is None, f"the server exited: {process.stdout.read()}"
+                try:
+                    caller.get("/healthz")
+                    break
+                except httpx.HTTPError:
+                    assert time.monotonic() < deadline, "the server never came up"
+                    time.sleep(0.1)
+
+            assert caller.post("/api/stop", json={}).json()["stopping"] is True
+
+        assert process.wait(timeout=10) == gca.EXIT_OK
+    finally:
+        if process.poll() is None:  # pragma: no cover - only on a failed run
+            process.kill()
+        process.stdout.close()
+
+    # And it stays off: the next start reads the key it just wrote and exits.
+    assert "enabled = false" in config_file.read_text()
+    again = subprocess.run(
+        [sys.executable, "-m", "garbage_collection_automation.web", "--config", str(config_file)],
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert again.returncode == gca.EXIT_OK
+    assert "switched off" in again.stdout + again.stderr
 
 
 # --- who is allowed to call them ------------------------------------------------------

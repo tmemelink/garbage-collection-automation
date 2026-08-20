@@ -36,6 +36,44 @@ let tokenIsFromTheEnvironment = false;
 let apiKeyIsFromTheEnvironment = false;
 let configIsWritable = true;
 
+/*
+ * The configuration as the server last handed it over, which is the file as it
+ * was on disk at that moment. Kept so a save can say what it is about to
+ * change: the confirmation is worth reading only if it names the differences,
+ * and this is the only copy of the "before" the page has.
+ */
+let onDisk = {};
+
+/* Every field the form posts, and what the confirmation calls it. */
+const FIELD_LABELS = {
+  postcode: "Postcode",
+  house_number: "House number",
+  addition: "Addition",
+  api_key: "mijnafvalwijzer API key",
+  timeout_seconds: "Timeout (seconds)",
+  retries: "Retries",
+  lookahead_days: "Look ahead (days)",
+  due_time: "Due time",
+  types: "Waste types",
+  todoist_enabled: "Export to Todoist",
+  todoist_token: "Todoist API token",
+  todoist_project: "Todoist project",
+  remind_days_before: "Remind (days before)",
+  web_enabled: "Serve this page",
+  web_host: "Web host",
+  web_port: "Web port",
+  logging_level: "Log level",
+};
+
+/*
+ * The three the running server cannot be talked out of: it bound its address
+ * and port at startup, and the file is only what the next start will read.
+ */
+const RESTART_FIELDS = ["web_enabled", "web_host", "web_port"];
+
+/* Changed, not to what: a confirmation is not a place to print either secret. */
+const SECRET_FIELDS = ["api_key", "todoist_token"];
+
 // --- talking to the server ------------------------------------------------------------
 
 /*
@@ -93,6 +131,7 @@ async function load() {
   }
 
   fillConfig(state.config);
+  fillConfigFile(state.config_file);
   fillSchedule(state.schedule);
   fillLastExport(state.last_run);
 }
@@ -131,23 +170,31 @@ function fillLastExport(lastRun, { describe = true } = {}) {
 // --- the configuration form -----------------------------------------------------------
 
 function fillConfig(config) {
+  onDisk = config;
+
   for (const name of [
     "postcode",
     "house_number",
     "addition",
+    "timeout_seconds",
+    "retries",
     "lookahead_days",
     "due_time",
     "todoist_project",
     "remind_days_before",
+    "web_host",
+    "web_port",
   ]) {
     el(name).value = config[name];
   }
   el("todoist_enabled").checked = config.todoist_enabled;
+  el("web_enabled").checked = config.web_enabled;
   el("todoist_token").value = config.todoist_token;
   el("api_key").value = config.api_key;
   el("config_path").textContent = config.config_path;
 
   fillTypes(config.known_types, config.types);
+  fillLevels(config.known_levels, config.logging_level);
 
   /* Either secret may come from the environment, which wins over the file. */
   tokenIsFromTheEnvironment = config.token_from_environment;
@@ -158,12 +205,52 @@ function fillConfig(config) {
   el("api_key_hint").hidden = !apiKeyIsFromTheEnvironment;
   el("api_key").readOnly = apiKeyIsFromTheEnvironment;
 
-  /* The installer decides whether this file is the service user's to write. */
+  /* The installer decides whether this file is the service user's to write.
+     Stopping writes it too - it is [web] enabled turned off - so a file this
+     server may not write leaves both buttons out of reach, not just the save. */
   configIsWritable = config.writable;
   el("save").disabled = !configIsWritable;
+  el("stop").disabled = !configIsWritable;
   if (!configIsWritable) {
     showConfigError(`${config.config_path} is not writable by the server; edit it there.`);
   }
+}
+
+/*
+ * The file the form is a reading of, shown as it actually is: comments, hand
+ * edits, the sections the form has no field for. api.py masks the secrets in it
+ * before it is sent, so this panel is the one part of the page that can be
+ * screenshotted without a thought.
+ */
+function fillConfigFile(file) {
+  el("config_file_text").textContent = file.text ?? file.error;
+  el("config_file_meta").textContent = describeFile(file);
+}
+
+function describeFile(file) {
+  /* Either it could not be read, or it could not be parsed and so could not be
+     masked; the panel itself carries the server's sentence about which. */
+  if (file.text === null) return "not shown";
+  const notes = [file.path];
+  /* The server's own clock, written the way it sent it: this is a file's mtime
+     on that machine, not a moment to re-read in the reader's timezone. */
+  if (file.modified_at) notes.push(`saved ${file.modified_at.replace("T", " ")}`);
+  if (file.masked) notes.push("secrets masked");
+  if (file.truncated) notes.push("shown in part");
+  if (!file.writable) notes.push("read-only");
+  return notes.join("  \u00b7  ");
+}
+
+function fillLevels(known, chosen) {
+  const select = el("logging_level");
+  select.replaceChildren();
+  for (const level of known) {
+    const option = document.createElement("option");
+    option.value = level;
+    option.textContent = level;
+    select.append(option);
+  }
+  select.value = chosen;
 }
 
 function fillTypes(known, chosen) {
@@ -192,12 +279,18 @@ function formPayload() {
     postcode: el("postcode").value.trim(),
     house_number: el("house_number").value.trim(),
     addition: el("addition").value.trim(),
+    timeout_seconds: Number(el("timeout_seconds").value),
+    retries: Number(el("retries").value),
     lookahead_days: Number(el("lookahead_days").value),
     due_time: el("due_time").value,
     types: [...document.querySelectorAll("#types input:checked")].map((box) => box.value),
     todoist_enabled: el("todoist_enabled").checked,
     todoist_project: el("todoist_project").value,
     remind_days_before: Number(el("remind_days_before").value),
+    web_enabled: el("web_enabled").checked,
+    web_host: el("web_host").value.trim(),
+    web_port: Number(el("web_port").value),
+    logging_level: el("logging_level").value,
   };
   /* Sending these would be refused anyway; not sending them says so without asking. */
   if (!tokenIsFromTheEnvironment) payload.todoist_token = el("todoist_token").value;
@@ -205,16 +298,71 @@ function formPayload() {
   return payload;
 }
 
+/*
+ * What this form would change about the file, as a list a person can read
+ * before saying yes. The comparison is against the last answer the server gave,
+ * which is the file as it was then - not against the form's own defaults.
+ */
+function changed(payload) {
+  const listed = [];
+  for (const [field, value] of Object.entries(payload)) {
+    if (sameValue(field, value, onDisk[field])) continue;
+    listed.push(
+      /* "replaced" rather than the new one: a secret is not printed here even
+         though the field above it holds the same characters. */
+      SECRET_FIELDS.includes(field)
+        ? { field, was: "", now: value ? "replaced" : "cleared" }
+        : { field, was: valueText(onDisk[field]), now: valueText(value) },
+    );
+  }
+  return listed;
+}
+
+function sameValue(field, value, was) {
+  /* The switches are in the order the server lists the streams, which is not
+     always the order the file has them in; that difference is not a change. */
+  if (field === "types") return String([...value].sort()) === String([...(was ?? [])].sort());
+  return value === was;
+}
+
+function valueText(value) {
+  if (typeof value === "boolean") return value ? "on" : "off";
+  if (Array.isArray(value)) return value.join(", ") || "none";
+  return value === "" ? "(empty)" : String(value);
+}
+
 async function save(event) {
   event.preventDefault();
   showConfigError(null);
+
+  const payload = formPayload();
+  const changes = changed(payload);
+  const restarting = changes.some((change) => RESTART_FIELDS.includes(change.field));
+  const agreed = await confirmed({
+    title: "Overwrite the configuration?",
+    text:
+      (changes.length
+        ? `This rewrites ${onDisk.config_path}, the file the scheduled run reads.`
+        : `Nothing on this form differs from the file. Saving rewrites ` +
+          `${onDisk.config_path} anyway.`) +
+      " The whole document is re-rendered, so any comment or key you added to it" +
+      " by hand and the page has no field for is not written back.",
+    changes,
+    note: restarting
+      ? "[web] is read when the server starts. This one keeps the address and " +
+        "port it is already listening on until it is restarted."
+      : null,
+    label: "Save",
+  });
+  if (!agreed) return;
 
   const button = el("save");
   button.disabled = true;
   button.textContent = "Saving…";
   try {
-    const saved = await ask("/api/config", formPayload());
+    const saved = await ask("/api/config", payload);
     fillConfig(saved.config);
+    fillConfigFile(saved.config_file);
     button.textContent = "Saved";
     setTimeout(() => (button.textContent = "Save configuration"), 1500);
   } catch (error) {
@@ -223,6 +371,86 @@ async function save(event) {
   } finally {
     button.disabled = !configIsWritable;
   }
+}
+
+// --- switching the page off -----------------------------------------------------------
+
+/*
+ * The last thing this page does. The server writes [web] enabled = false, then
+ * answers, then stops - so this request succeeds and the next one would not
+ * connect at all. Nothing here reloads or retries afterwards for that reason:
+ * there is no server left to ask, and the takeover below is the whole ending.
+ */
+async function switchOff() {
+  const agreed = await confirmed({
+    title: "Switch the page off and stop it?",
+    text:
+      `This writes enabled = false under [web] in ${onDisk.config_path} - ` +
+      "re-rendering the whole file, exactly as a save does - and then stops the " +
+      "server. The job keeps running from cron; only the page goes away.",
+    note:
+      "Bringing it back means editing that file on the machine itself and " +
+      "starting the service - there will be no page here to do it from.",
+    label: "Switch off and stop",
+  });
+  if (!agreed) return;
+
+  const button = el("stop");
+  button.disabled = true;
+  button.textContent = "Stopping…";
+  try {
+    const answer = await ask("/api/stop", {});
+    sayGoodbye(answer.config.config_path);
+  } catch (error) {
+    showConfigError(error.message);
+    button.textContent = "Switch off and stop the server";
+    button.disabled = !configIsWritable;
+  }
+}
+
+function sayGoodbye(configPath) {
+  el("farewell_path").textContent = configPath;
+  document.querySelector("main").hidden = true;
+  el("status").hidden = true;
+  el("farewell").hidden = false;
+}
+
+// --- asking first ---------------------------------------------------------------------
+
+/*
+ * Both buttons that write config.toml go through here. The file belongs to a
+ * job that runs unattended at four in the morning, and neither "save" nor
+ * "stop" is something to do by brushing past a button.
+ *
+ * Resolves true when the person said yes. Escape is a no, which is why the
+ * return value is set before the dialog opens rather than trusted from last time.
+ */
+function confirmed({ title, text, changes = [], note = null, label }) {
+  const dialog = el("confirm");
+  el("confirm_title").textContent = title;
+  el("confirm_text").textContent = text;
+  el("confirm_ok").textContent = label;
+
+  const list = el("confirm_list");
+  list.replaceChildren();
+  for (const change of changes) {
+    const node = clone("change-template");
+    node.querySelector(".modal__field").textContent = `${FIELD_LABELS[change.field]}:`;
+    node.querySelector(".modal__was").textContent = change.was;
+    node.querySelector(".modal__now").textContent = change.now;
+    list.append(node);
+  }
+
+  el("confirm_note").textContent = note ?? "";
+  el("confirm_note").hidden = note === null;
+
+  dialog.returnValue = "cancel";
+  dialog.showModal();
+  return new Promise((resolve) => {
+    dialog.addEventListener("close", () => resolve(dialog.returnValue === "confirm"), {
+      once: true,
+    });
+  });
 }
 
 function showConfigError(message) {
@@ -422,5 +650,11 @@ for (const name of Object.keys(ACTIONS)) {
   el(name).addEventListener("click", () => act(name));
 }
 el("config").addEventListener("submit", save);
+el("stop").addEventListener("click", switchOff);
+
+/* The dialog's own two buttons. They are not a <form method="dialog"> because
+   the page is served under a Content-Security-Policy that names form-action. */
+el("confirm_ok").addEventListener("click", () => el("confirm").close("confirm"));
+el("confirm_cancel").addEventListener("click", () => el("confirm").close("cancel"));
 
 load();
