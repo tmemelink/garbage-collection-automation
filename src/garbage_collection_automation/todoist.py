@@ -391,12 +391,8 @@ def _content(collection: Collection) -> str:
 
 
 def _description(collection: Collection) -> str:
-    """The marker, and a sentence saying why it is there."""
-    return (
-        f"[gca:{collection.date.isoformat()}:{collection.code}]\n"
-        "Written by garbage-collection-automation. The line above is how the next run "
-        "recognises this todo; the rest of it is yours."
-    )
+    """The marker, and nothing else: it is how the next run recognises this todo."""
+    return f"[gca:{collection.date.isoformat()}:{collection.code}]"
 
 
 def _due(moment: datetime) -> str:

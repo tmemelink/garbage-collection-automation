@@ -44,7 +44,7 @@ def task(task_id: str, collection: Collection, *, project_id: str = HOME, **over
     return {
         "id": task_id,
         "content": f"{collection.waste_type} buitenzetten",
-        "description": f"[gca:{collection.date.isoformat()}:{collection.code}]\nWritten by ...",
+        "description": f"[gca:{collection.date.isoformat()}:{collection.code}]\nnotes of my own",
         "project_id": project_id,
         "labels": [LABEL],
     } | overrides
