@@ -34,7 +34,7 @@ longer agrees:
 | ----------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------ |
 | The same collections as last time                     | Nothing at all — Todoist is not called                                                                             |
 | A date added, moved or no longer collected            | Asks Todoist what it holds, works out the difference, applies it                                                   |
-| `due_time`, `project` or `remind_days_before` changed | The same, and rewrites every todo that stays                                                                       |
+| `due_time`, `project`, `section` or `remind_days_before` changed | The same, and rewrites every todo that stays                                                                       |
 | No state file, or one it cannot read                  | The same; a missing record is a reason to ask                                                                      |
 | A previous run that stopped halfway                   | The same, and rewrites every todo that stays; what got through was recorded, but only Todoist can say what did not |
 
@@ -50,9 +50,10 @@ The schedule API publishes **dates only, never a time**, which is why
 
 ### The to-dos
 
-One todo per collection, in the project named by `export.todoist.project`, due
-on the collection day at `due_time` with a reminder `remind_days_before` days
-ahead of that:
+One todo per collection, in the project named by `export.todoist.project` — in
+the section named by `export.todoist.section`, when one is named — due on the
+collection day at `due_time` with a reminder `remind_days_before` days ahead of
+that:
 
 ```
 Restafval buitenzetten                       ← the line you read
@@ -63,7 +64,8 @@ Restafval buitenzetten                       ← the line you read
 
 The **label** is what a run looks for: every open todo carrying it is this
 project's, in whichever project it sits, so one you drag elsewhere is found
-again and moved back on the next rewrite. The **marker** in the description is
+again and moved back on the next rewrite. With no `section` configured, where
+inside the project a todo sits is left to you. The **marker** in the description is
 how a run knows which collection a todo stands for — rename the line above it
 and it is still recognised, delete the marker and the todo is left alone from
 then on, untouched and unmanaged. Everything else — the content, the reminder
@@ -251,6 +253,7 @@ writes them in; everything else is edited there afterwards.
 | `collection.types`                                 | `["restafval", "papier", "gft"]` | `restafval`, `papier`, `gft`, `pmd`, `glas`, `textiel`, `kca`, `kerstbomen`                                                                                |
 | `collection.timeout_seconds` / `.retries`          | `15` / `1`                       | Limits on the single request per run                                                                                                                       |
 | `export.todoist.enabled` / `.token` / `.project`   | `true` / — / `"Home"`            | The Todoist target; on unless the file says otherwise, and skipped with a log line when no token is configured                                             |
+| `export.todoist.section`                           | `""`                             | The section within that project, by name; empty puts the to-dos in the project itself. A section that is not there fails the run, exactly as a missing project does                                         |
 | `export.todoist.remind_days_before`                | `1`                              | How long before the collection the reminder goes off; `0` is the due moment itself. Reminders need Todoist Pro; without it they are skipped with a warning |
 | `web.enabled`                                      | `false`                          | Whether the local page is served at all                                                                                                                    |
 | `web.host` / `.port`                               | `"127.0.0.1"` / `8080`           | Loopback addresses and unprivileged ports only                                                                                                             |
@@ -258,8 +261,8 @@ writes them in; everything else is edited there afterwards.
 
 
 Unknown keys are rejected rather than ignored, so a typo fails the run with a
-message naming the key. Changing `due_time`, `project` or `remind_days_before`
-makes the next run rewrite every todo it already created.
+message naming the key. Changing `due_time`, `project`, `section` or
+`remind_days_before` makes the next run rewrite every todo it already created.
 
 ### Secrets
 

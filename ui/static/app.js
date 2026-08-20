@@ -58,6 +58,7 @@ const FIELD_LABELS = {
   todoist_enabled: "Export to Todoist",
   todoist_token: "Todoist API token",
   todoist_project: "Todoist project",
+  todoist_section: "Todoist section",
   remind_days_before: "Remind (days before)",
   web_enabled: "Serve this page",
   web_host: "Web host",
@@ -87,25 +88,57 @@ const SECRET_FIELDS = ["api_key", "todoist_token"];
 const TIMEOUT_MS = 180_000;
 
 /*
+ * How quickly a failure has to come back to be a connection that was already
+ * dead rather than a run that fell over. A browser holds connections open in
+ * the hope of reusing them, and one of those can be gone - a tunnel restarted,
+ * a server upgraded - without anything having said so; writing into it fails in
+ * the time it takes to notice, before the request has reached anyone. That one
+ * is worth trying again on a new connection. A failure minutes into a run is
+ * not: something took the answer away mid-flight, and the run itself may well
+ * have happened.
+ */
+const DEAD_SOCKET_MS = 1000;
+
+/* One attempt, with the page's own deadline on it. */
+function send(path, body) {
+  return fetch(path, {
+    method: body === undefined ? "GET" : "POST",
+    headers: body === undefined ? {} : { "Content-Type": "application/json" },
+    body: body === undefined ? undefined : JSON.stringify(body),
+    signal: AbortSignal.timeout(TIMEOUT_MS),
+  });
+}
+
+/* A failed fetch, said the way the page says things. */
+function unreachable(error) {
+  return new Error(
+    error.name === "TimeoutError"
+      ? "the server did not answer in time; the run may still be going on - reload to see"
+      : `the server could not be reached: ${error.message}`,
+  );
+}
+
+/*
  * One request, and one place errors turn into something a person can read.
  * Every endpoint answers json, including its refusals, so a failure here is a
  * server that fell over rather than a request that was refused.
  */
 async function ask(path, body) {
   let response;
+  const started = performance.now();
   try {
-    response = await fetch(path, {
-      method: body === undefined ? "GET" : "POST",
-      headers: body === undefined ? {} : { "Content-Type": "application/json" },
-      body: body === undefined ? undefined : JSON.stringify(body),
-      signal: AbortSignal.timeout(TIMEOUT_MS),
-    });
+    response = await send(path, body);
   } catch (error) {
-    throw new Error(
-      error.name === "TimeoutError"
-        ? "the server did not answer in time; the run may still be going on - reload to see"
-        : `the server could not be reached: ${error.message}`,
-    );
+    if (error.name === "TimeoutError" || performance.now() - started > DEAD_SOCKET_MS) {
+      throw unreachable(error);
+    }
+    try {
+      /* On a connection this one opens, the last one having turned out to be
+         a socket nobody was listening on any more. */
+      response = await send(path, body);
+    } catch (again) {
+      throw unreachable(again);
+    }
   }
 
   let payload = null;
@@ -181,6 +214,7 @@ function fillConfig(config) {
     "lookahead_days",
     "due_time",
     "todoist_project",
+    "todoist_section",
     "remind_days_before",
     "web_host",
     "web_port",
@@ -286,6 +320,7 @@ function formPayload() {
     types: [...document.querySelectorAll("#types input:checked")].map((box) => box.value),
     todoist_enabled: el("todoist_enabled").checked,
     todoist_project: el("todoist_project").value,
+    todoist_section: el("todoist_section").value.trim(),
     remind_days_before: Number(el("remind_days_before").value),
     web_enabled: el("web_enabled").checked,
     web_host: el("web_host").value.trim(),

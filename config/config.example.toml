@@ -40,6 +40,10 @@ token = ""
 # is not there fails the run rather than being created, so a typo cannot scatter
 # to-dos into a project nobody looks at.
 project = "Home"
+# The section within that project, by name; leave it empty to put the to-dos in
+# the project itself. A section that is not there fails the run in the same way
+# a project that is not there does.
+section = ""
 # How long before the collection moment the to-dos reminder goes off, in days.
 # The to-dos themselves are created for the whole lookahead window above.
 # Custom reminders need Todoist Pro; on a free account the run warns once and

@@ -19,6 +19,8 @@ from .test_reconciliation import GFT, RESTAFVAL, TODAY, config
 
 #: The project the configuration names, as Todoist knows it.
 HOME = "77"
+#: A section in it, for the tests that configure one.
+RECURRING = "88"
 
 
 @pytest.fixture(autouse=True)
@@ -37,6 +39,10 @@ def page(*items: dict, cursor: str | None = None) -> httpx.Response:
 
 def project(project_id: str, name: str) -> dict:
     return {"id": project_id, "name": name}
+
+
+def section(section_id: str, name: str) -> dict:
+    return {"id": section_id, "name": name, "project_id": HOME}
 
 
 def task(task_id: str, collection: Collection, *, project_id: str = HOME, **overrides) -> dict:
@@ -340,6 +346,109 @@ def test_an_account_full_of_projects_is_not_recited_in_full():
 
     with pytest.raises(TodoistError, match=r"Project \d+, \.\.\. - create it"):
         api.client().create_task(RESTAFVAL)
+
+
+# --- the section within the project ----------------------------------------------------
+
+
+def test_a_todo_goes_in_the_configured_section():
+    api = Api(
+        {
+            "GET sections": page(section("1", "Errands"), section(RECURRING, "recurring")),
+            "POST tasks": reply({"id": "42"}),
+            "POST reminders": reply({"id": "r1"}),
+        }
+    )
+    client = api.client(section="Recurring")
+
+    client.create_task(RESTAFVAL)
+    client.create_task(GFT)
+
+    sent = body(api.calls("POST tasks")[0])
+    assert sent["section_id"] == RECURRING
+    assert sent["project_id"] == HOME, "the project is still said outright"
+    assert api.calls("GET sections")[0].url.params["project_id"] == HOME
+    assert len(api.calls("GET sections")) == 1, "one lookup per client, not per todo"
+
+
+def test_no_section_configured_means_the_project_itself_and_no_lookup():
+    """Todoist is never asked about sections by an export that names none."""
+    api = Api({"POST tasks": reply({"id": "42"}), "POST reminders": reply({"id": "r1"})})
+
+    api.client().create_task(RESTAFVAL)
+
+    assert "section_id" not in body(api.calls("POST tasks")[0])
+    assert api.calls("GET sections") == []
+
+
+def test_a_section_that_does_not_exist_is_said_out_loud_rather_than_created():
+    """Same reasoning as the project: a typo is not permission to add one."""
+    api = Api({"GET sections": page(section("1", "Errands"))})
+
+    with pytest.raises(
+        TodoistError, match="project 'Home' has no section named 'Recurring'; it has Errands"
+    ):
+        api.client(section="Recurring").create_task(RESTAFVAL)
+
+
+def test_a_project_full_of_sections_is_not_recited_in_full():
+    api = Api({"GET sections": page(*(section(str(n), f"Section {n}") for n in range(11)))})
+
+    with pytest.raises(TodoistError, match=r"Section \d+, \.\.\. - create it"):
+        api.client(section="Recurring").create_task(RESTAFVAL)
+
+
+def test_a_todo_in_the_wrong_section_is_moved_back_when_it_is_rewritten():
+    """One move says both: a section id carries its project along with it."""
+    api = Api(
+        {
+            "GET tasks": page(task("42", RESTAFVAL, project_id="9", section_id="3")),
+            "GET sections": page(section(RECURRING, "Recurring")),
+            "POST tasks/42": reply({"id": "42"}),
+            "POST tasks/42/move": reply({"id": "42"}),
+            "GET reminders": page({"id": "r1", "type": "relative", "minute_offset": 1440}),
+        }
+    )
+    client = api.client(section="Recurring")
+
+    client.list_tasks()
+    client.update_task("42", RESTAFVAL)
+
+    assert body(api.calls("POST tasks/42/move")[0]) == {"section_id": RECURRING}
+
+
+def test_a_todo_already_in_the_configured_section_is_not_moved():
+    api = Api(
+        {
+            "GET tasks": page(task("42", RESTAFVAL, section_id=RECURRING)),
+            "GET sections": page(section(RECURRING, "Recurring")),
+            "POST tasks/42": reply({"id": "42"}),
+            "GET reminders": page({"id": "r1", "type": "relative", "minute_offset": 1440}),
+        }
+    )
+    client = api.client(section="Recurring")
+
+    client.list_tasks()
+    client.update_task("42", RESTAFVAL)
+
+    assert api.calls("POST tasks/42/move") == []
+
+
+def test_a_todo_filed_in_a_section_is_left_there_when_none_is_configured():
+    """Without a section to insist on, where inside the project it sits is not ours."""
+    api = Api(
+        {
+            "GET tasks": page(task("42", RESTAFVAL, section_id="3")),
+            "POST tasks/42": reply({"id": "42"}),
+            "GET reminders": page({"id": "r1", "type": "relative", "minute_offset": 1440}),
+        }
+    )
+    client = api.client()
+
+    client.list_tasks()
+    client.update_task("42", RESTAFVAL)
+
+    assert api.calls("POST tasks/42/move") == []
 
 
 def test_a_call_that_answers_with_nothing_at_all_is_still_an_answer():

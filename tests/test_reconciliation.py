@@ -119,6 +119,9 @@ def test_the_signature_covers_what_shapes_a_todo():
     assert reconciliation.signature(config()) == reconciliation.signature(config())
     assert reconciliation.signature(config()) != reconciliation.signature(config(project="Huis"))
     assert reconciliation.signature(config()) != reconciliation.signature(
+        config(section="Terugkerend")
+    )
+    assert reconciliation.signature(config()) != reconciliation.signature(
         config(remind_days_before=2)
     )
     assert reconciliation.signature(config()) != reconciliation.signature(

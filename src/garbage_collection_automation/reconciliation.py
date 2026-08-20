@@ -119,6 +119,7 @@ def signature(config: Config) -> str:
     todoist = config.export.todoist
     return (
         f"todoist project={todoist.project} "
+        f"section={todoist.section} "
         f"due={config.collection.due_time.isoformat('minutes')} "
         f"remind={todoist.remind_days_before}"
     )

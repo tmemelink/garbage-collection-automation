@@ -222,6 +222,40 @@ def test_every_answer_ends_its_connection(client, request_):
     assert response.headers["connection"] == "close"
 
 
+def test_a_connection_opened_before_there_is_anything_to_send_is_still_there(server, monkeypatch):
+    """The socket a button press is actually written into.
+
+    A browser opens connections ahead of the requests it will put on them and
+    keeps them for minutes. Closing one is the thing this server cannot do
+    quietly - nothing was asked, so there is no response to write
+    "Connection: close" on - and the browser would go on believing in it and
+    write the next press into a socket that is gone. What the person sees then
+    is their browser's "NetworkError", about a request this server never saw.
+    """
+    monkeypatch.setattr(web.Handler, "timeout", 0.2)
+
+    with socket.create_connection(server.server_address[:2], timeout=5) as sock:
+        time.sleep(0.6)  # the page being read; a real one is idle far longer
+        sock.sendall(b"GET /healthz HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n")
+
+        assert b"200 OK" in sock.recv(4096)
+
+
+def test_a_request_that_stops_half_way_through_is_still_given_up_on(server, monkeypatch):
+    """The other half of the same rule: the clock starts when the request does.
+
+    Waiting forever for the first byte is what keeps a browser's spare
+    connection alive; waiting forever for the rest of a request would be a
+    thread held by anything that opened a socket and dribbled into it.
+    """
+    monkeypatch.setattr(web.Handler, "timeout", 0.2)
+
+    with socket.create_connection(server.server_address[:2], timeout=5) as sock:
+        sock.sendall(b"GET /healthz HTTP/1.1\r\n")  # no blank line: it never ends
+
+        assert sock.recv(4096) == b"", "the server waited out a request that never arrived"
+
+
 @pytest.mark.parametrize("method", ["PUT", "DELETE", "OPTIONS", "TRACE"])
 def test_a_method_this_server_does_not_have_is_refused_in_its_own_words(client, method):
     """The base class answers these itself - in html, and without a single header."""
@@ -558,7 +592,10 @@ def test_the_stop_endpoint_asks_the_server_to_stop(client, paths, server):
 
     client.post("/api/stop", json={})
 
-    assert server.stopping.is_set(), "serve() would have kept serving"
+    # Waited for rather than read: _api() answers first and sets this after, so
+    # that the page is told what it asked for happened while there is still a
+    # server to tell it. The client can be back here before that second half runs.
+    assert server.stopping.wait(timeout=5), "serve() would have kept serving"
 
 
 def test_a_refused_stop_leaves_the_server_serving(client, paths, server):

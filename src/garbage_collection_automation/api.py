@@ -140,6 +140,7 @@ def _config_payload(config: Config, paths: Paths) -> dict:
         "todoist_enabled": todoist.enabled,
         "todoist_token": todoist.token,
         "todoist_project": todoist.project,
+        "todoist_section": todoist.section,
         "remind_days_before": todoist.remind_days_before,
         # The page grays the token field out when this is true: the environment
         # wins over the file, so saving one from here would change nothing.
@@ -377,6 +378,7 @@ FORM_FIELDS = frozenset(
         "todoist_enabled",
         "todoist_token",
         "todoist_project",
+        "todoist_section",
         "remind_days_before",
         "web_enabled",
         "web_host",
@@ -479,6 +481,7 @@ def _overlay(document: dict, payload: dict) -> None:
         ("retries", collection, "retries"),
         ("todoist_enabled", todoist, "enabled"),
         ("todoist_project", todoist, "project"),
+        ("todoist_section", todoist, "section"),
         ("remind_days_before", todoist, "remind_days_before"),
         ("web_enabled", web, "enabled"),
         ("web_host", web, "host"),

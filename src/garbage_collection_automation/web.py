@@ -97,9 +97,11 @@ SECURITY_HEADERS = {
     "Cache-Control": "no-store",
 }
 
-#: How long a connection has to send its one request. Long enough to arrive over
-#: an ssh tunnel, short enough that a socket opened and then forgotten about does
-#: not hold a thread until the container is restarted.
+#: How long a request has to arrive once it has started - see
+#: ``handle_one_request()``, which is also why this is not a limit on how long a
+#: connection may sit there having sent nothing. Long enough for a request to
+#: cross an ssh tunnel, short enough that half of one does not hold a thread
+#: until the container is restarted.
 CONNECTION_TIMEOUT = 30
 
 #: How long a stop waits for a run that is already inside the pipeline; see
@@ -178,6 +180,47 @@ class Handler(BaseHTTPRequestHandler):
         super().__init__(*args, **kwargs)
 
     # --- the request ---------------------------------------------------------
+
+    def setup(self) -> None:
+        super().setup()
+        # A connection that has asked nothing is waited on for as long as it
+        # takes (see below), so this is what eventually reaps one whose other
+        # end vanished without saying so - a tunnel killed, a laptop shut. The
+        # kernel's own hour-scale clock is the right one: what an abandoned
+        # connection costs is a daemon thread parked on a read, and nothing else.
+        self.connection.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+
+    def handle_one_request(self) -> None:
+        """Wait as long as it takes for a request, then hold it to the clock.
+
+        A browser opens a connection before it has anything to send on it, so
+        that one is ready the moment the person clicks something, and it keeps
+        that connection for minutes. Timing such a connection out is the one
+        thing a server cannot do quietly: there is no response to write
+        ``Connection: close`` on when nothing was ever asked, so the browser
+        goes on believing in a socket that is gone and writes the next button
+        press into it. That reaches the person as their browser's "NetworkError"
+        - from a server that is running perfectly well, about a request it never
+        saw. It is why this waits without a deadline for the first byte.
+
+        The deadline starts with the request: a request that arrives half
+        written still gives up on time, which is what the timeout is for. Every
+        response closes its connection - see ``_send()`` - so this runs once per
+        connection and there is no idle period after it to time out.
+        """
+        self.connection.settimeout(None)
+        try:
+            waiting = self.rfile.peek(1)
+        except OSError:
+            self.close_connection = True
+            return
+        self.connection.settimeout(self.timeout)
+        if not waiting:
+            # Closed without asking anything: a browser tidying away a
+            # connection it turned out not to need.
+            self.close_connection = True
+            return
+        super().handle_one_request()
 
     def do_GET(self) -> None:
         self._respond(with_body=True)

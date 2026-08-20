@@ -79,6 +79,9 @@ class TodoistExportConfig:
     enabled: bool = True
     token: str = ""
     project: str = "Home"
+    #: The section within that project, by name. Empty means the project itself,
+    #: which is where a todo with no section of its own sits.
+    section: str = ""
     remind_days_before: int = 1
 
 
@@ -221,7 +224,9 @@ def _waste_types(section: dict, label: str) -> tuple[str, ...]:
 
 def _todoist(section: dict) -> TodoistExportConfig:
     label = "export.todoist"
-    _reject_unknown(section, label, {"enabled", "token", "project", "remind_days_before"})
+    _reject_unknown(
+        section, label, {"enabled", "token", "project", "section", "remind_days_before"}
+    )
     remind = _optional_int(section, label, "remind_days_before", 1)
     if remind < 0:
         raise ConfigError(f"[{label}] remind_days_before cannot be negative, got {remind}")
@@ -253,6 +258,7 @@ def _todoist(section: dict) -> TodoistExportConfig:
         enabled=enabled,
         token=token,
         project=_optional_str(section, label, "project", "Home"),
+        section=_optional_str(section, label, "section", ""),
         remind_days_before=remind,
     )
 
@@ -432,6 +438,10 @@ token = {_toml_str(token)}
 # is not there fails the run rather than being created, so a typo cannot scatter
 # to-dos into a project nobody looks at.
 project = {_toml_str(todoist.project)}
+# The section within that project, by name; leave it empty to put the to-dos in
+# the project itself. A section that is not there fails the run in the same way
+# a project that is not there does.
+section = {_toml_str(todoist.section)}
 # How long before the collection moment the to-dos reminder goes off, in days.
 # The to-dos themselves are created for the whole lookahead window above.
 remind_days_before = {todoist.remind_days_before}

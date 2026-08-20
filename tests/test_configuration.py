@@ -24,6 +24,7 @@ def test_example_config_is_valid():
     assert config.collection.types == ("restafval", "papier", "gft")
     assert config.export.todoist.enabled is False, "on by default, but the template has no token"
     assert config.export.todoist.project == "Home"
+    assert config.export.todoist.section == "", "the project itself, until one is named"
     assert config.logging.level == "INFO"
 
 
@@ -314,7 +315,7 @@ def test_what_is_written_is_what_is_read_back(write_config):
         '[collection]\napi_key = "app-key"\nlookahead_days = 45\ndue_time = "6:30"\n'
         'types = ["pmd", "glas"]\ntimeout_seconds = 20\nretries = 2\n'
         '[export.todoist]\nenabled = true\ntoken = "s3cret"\nproject = "Huis"\n'
-        "remind_days_before = 3\n"
+        'section = "Terugkerend"\nremind_days_before = 3\n'
         '[web]\nenabled = true\nhost = "::1"\nport = 9000\n'
         '[logging]\nlevel = "DEBUG"\n'
     )

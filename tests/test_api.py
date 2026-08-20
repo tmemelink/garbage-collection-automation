@@ -615,11 +615,14 @@ def test_a_save_writes_the_fields_it_was_sent_and_leaves_the_others_alone(paths)
     """The form may reach every key; a save still only moves the ones it carried."""
     paths.config.write_text(MINIMAL_CONFIG + "\n[web]\nenabled = true\nport = 9001\n")
 
-    api.save_config({"lookahead_days": 45, "todoist_project": "Huis"}, paths)
+    api.save_config(
+        {"lookahead_days": 45, "todoist_project": "Huis", "todoist_section": "Terugkerend"}, paths
+    )
 
     after = configuration.load(paths.config)
     assert after.collection.lookahead_days == 45
     assert after.export.todoist.project == "Huis"
+    assert after.export.todoist.section == "Terugkerend"
     assert after.web.enabled is True, "not sent, so not changed"
     assert after.web.port == 9001
 

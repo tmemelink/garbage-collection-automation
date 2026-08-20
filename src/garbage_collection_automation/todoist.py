@@ -12,8 +12,9 @@ Three things make a todo ours, and each answers a different question:
 * **the marker** in the description answers *which collection is it for?* The
   content is a sentence for a person to read, and a person may rewrite it, so
   the identity is kept somewhere a person has no reason to touch;
-* **the project** from the configuration answers *where do they go?* New to-dos
-  are created there, and an existing one is moved back when that setting changes.
+* **the project** from the configuration - and the section within it, when one
+  is named - answers *where do they go?* New to-dos are created there, and an
+  existing one is moved back when either setting changes.
 
 A todo that has lost its marker is left completely alone: it carries our label,
 but nothing says what it stands for, and removing something we cannot identify
@@ -63,8 +64,8 @@ _BACKOFF_SECONDS = 2.0
 #: However long Todoist asks us to wait, this is as long as a run will.
 _MAX_WAIT_SECONDS = 30.0
 
-#: How many project names an error message may list before it stops being one.
-_NAMED_PROJECTS = 10
+#: How many names an error message may list before it stops being one.
+_NAMED_IN_ERRORS = 10
 
 #: The API's maximum page, and a ceiling on how many we will follow: this
 #: listing is a few dozen to-dos, so more than that means the cursor is broken
@@ -107,17 +108,22 @@ class Todoist:
             )
         self._token = todoist.token.strip()
         self._project_name = todoist.project
+        #: Empty when the to-dos go in the project itself rather than a section of it.
+        self._section_name = todoist.section.strip()
         self._reminder_offset = todoist.remind_days_before * _MINUTES_PER_DAY
         self._due_time = config.collection.due_time
         self._client = client if client is not None else httpx.Client()
         self._owns_client = client is None
         self._project_id: str | None = None
+        self._section_id: str | None = None
         #: Whether reminders are worth asking for at all. Turned off for the rest
         #: of the run the first time Todoist refuses one; see _reminders_or_not().
         self._reminders = True
-        #: Which project each listed todo is in, so an update knows whether to
-        #: move it. Only ever what this client saw itself.
+        #: Which project - and which section of it, if any - each listed todo is
+        #: in, so an update knows whether to move it. Only ever what this client
+        #: saw itself.
         self._project_of: dict[str, str] = {}
+        self._section_of: dict[str, str] = {}
 
     def close(self) -> None:
         """Close the transport, unless it was handed to us."""
@@ -142,17 +148,22 @@ class Todoist:
                 continue
             tasks.append(task)
             self._project_of[task.task_id] = str(item.get("project_id") or "")
+            self._section_of[task.task_id] = str(item.get("section_id") or "")
         log.debug("todoist holds %d todo(s) with the %s label", len(tasks) + ignored, LABEL)
         return tasks
 
     def create_task(self, collection: Collection) -> str:
         """Write the todo for *collection* and return its Todoist id."""
+        section = self._section()
         created = self._post(
             "tasks",
             {
                 "content": _content(collection),
                 "description": _description(collection),
                 "project_id": self._project(),
+                # Left out altogether when no section is configured: Todoist then
+                # puts the todo in the project itself, which is what that means.
+                **({"section_id": section} if section else {}),
                 "labels": [LABEL],
                 "due_datetime": _due(collection.due_at(self._due_time)),
                 # Todoist would otherwise add the account's default reminder on
@@ -164,6 +175,7 @@ class Todoist:
         if not task_id:
             raise TodoistError("todoist created a todo without saying which one")
         self._project_of[task_id] = self._project()
+        self._section_of[task_id] = section
         self._add_reminder(task_id)
         return task_id
 
@@ -261,17 +273,34 @@ class Todoist:
             )
 
     def _move(self, task_id: str) -> None:
-        """Put a todo back in the configured project, if it is not there already.
+        """Put a todo back where the configuration says it goes, if it is elsewhere.
 
-        A project cannot be changed through an update, so this is its own call -
-        and it is made only when the listing showed the todo somewhere else.
+        Neither the project nor the section can be changed through an update, so
+        this is its own call - and it is made only when the listing showed the
+        todo somewhere else.
+
+        A section id carries its project along with it, so it is the whole answer
+        when a section is configured. Without one, only the project is ours to
+        insist on: where inside it someone has filed a todo is their business.
         """
         where = self._project_of.get(task_id)
-        if where is None or where == self._project():
+        if where is None:
             return
-        self._post(f"tasks/{task_id}/move", {"project_id": self._project()})
+        section = self._section()
+        if section:
+            if self._section_of.get(task_id) == section:
+                return
+            destination = {"section_id": section}
+            name = f"{self._project_name} / {self._section_name}"
+        else:
+            if where == self._project():
+                return
+            destination = {"project_id": self._project()}
+            name = self._project_name
+        self._post(f"tasks/{task_id}/move", destination)
         self._project_of[task_id] = self._project()
-        log.info("moved todo %s to %s", task_id, self._project_name)
+        self._section_of[task_id] = section
+        log.info("moved todo %s to %s", task_id, name)
 
     def _project(self) -> str:
         """The id of the configured project, looked up once per client."""
@@ -292,12 +321,40 @@ class Todoist:
                     return project_id
         # Creating it would turn a typo into a second project full of to-dos
         # nobody looks at, so say what is there and let a person decide.
-        listing = ", ".join(sorted(names)[:_NAMED_PROJECTS]) or "none at all"
-        if len(names) > _NAMED_PROJECTS:
-            listing += ", ..."
         raise TodoistError(
-            f"todoist has no project named '{self._project_name}'; it has {listing} - "
-            "create it, or correct [export.todoist] project"
+            f"todoist has no project named '{self._project_name}'; it has "
+            f"{_listed(names)} - create it, or correct [export.todoist] project"
+        )
+
+    def _section(self) -> str:
+        """The id of the configured section, or "" when the to-dos go in the project.
+
+        Looked up once per client, like the project, and only when there is a
+        name to look up: an export without a section never asks Todoist for one.
+        """
+        if not self._section_name:
+            return ""
+        if self._section_id is None:
+            self._section_id = self._find_section()
+        return self._section_id
+
+    def _find_section(self) -> str:
+        wanted = self._section_name.casefold()
+        names: list[str] = []
+        for item in self._pages("sections", {"project_id": self._project()}):
+            name = str(item.get("name") or "")
+            section_id = str(item.get("id") or "")
+            if name and section_id:
+                names.append(name)
+                if name.strip().casefold() == wanted:
+                    log.debug("todoist section %r is %s", name, section_id)
+                    return section_id
+        # Same reasoning as the project above: a typo is not permission to add
+        # something to someone's project.
+        raise TodoistError(
+            f"todoist project '{self._project_name}' has no section named "
+            f"'{self._section_name}'; it has {_listed(names)} - create it, or "
+            "correct [export.todoist] section"
         )
 
     # --- talking to the API ------------------------------------------------------
@@ -440,6 +497,12 @@ def _json(response: httpx.Response) -> dict:
     if not isinstance(payload, dict):
         raise TodoistError(f"todoist answered with {type(payload).__name__}, not an object")
     return payload
+
+
+def _listed(names: list[str]) -> str:
+    """The *names* an error may recite, and a hint that there were more."""
+    listing = ", ".join(sorted(names)[:_NAMED_IN_ERRORS]) or "none at all"
+    return f"{listing}, ..." if len(names) > _NAMED_IN_ERRORS else listing
 
 
 def _problem(response: httpx.Response, call: str) -> str:
