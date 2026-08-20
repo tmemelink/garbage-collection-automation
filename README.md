@@ -98,7 +98,6 @@ The recommended LXC configuration is as follows.
 | Time zone     | host                 | Due times come from `zoneinfo` regardless                  |
 | Autostart     | on boot              | So the schedule survives a host reboot                     |
 
-
 ### Installation
 
 Inside the container, as root:
@@ -114,17 +113,6 @@ pct exec <vmid> -- bash -c 'curl -fsSL https://raw.githubusercontent.com/tmemeli
 ```
 
 Pin a tag for reproducible installs: `... | bash -s -- --ref v0.1.0`.
-
-Or when using an ssh key to authenticate:
-
-```sh
-tmp_dir="$(mktemp -d)"
-git -C "$tmp_dir" init -q
-git -C "$tmp_dir" fetch -q --depth=1 \
-  git@github.com:tmemelink/garbage-collection-automation.git main
-git -C "$tmp_dir" show FETCH_HEAD:install.sh > install.sh
-rm -r "$tmp_dir"
-```
 
 A first install asks for the two things it cannot guess — the address to look up
 and the mijnafvalwijzer.nl app key — and writes them into `config.toml`:
@@ -145,6 +133,53 @@ Where there is no terminal to ask on — `pct exec`, cloud-init, CI — the answ
 are the `--postcode`, `--house-number`, `--addition` and `--api-key` flags, and
 without those the example values are written and the first run says so.
 
+### A private repository
+
+GitHub answers an unauthenticated request for a private repository with a 404 —
+the same answer a ref that does not exist gets. Both halves of a plain install
+are such requests: `install.sh` itself, and the source it downloads next.
+Either an ssh key or a token gets past that.
+
+With a key the container holds — its own key, registered with GitHub, for which
+a deploy key on the repository is enough — fetch the installer over ssh and let
+it fetch the rest the same way. The standard Debian template has no git yet:
+
+```sh
+apt-get update && apt-get install -y git
+tmp_dir="$(mktemp -d)"
+git -C "$tmp_dir" init -q
+git -C "$tmp_dir" fetch -q --depth=1 \
+  git@github.com:tmemelink/garbage-collection-automation.git main
+git -C "$tmp_dir" show FETCH_HEAD:install.sh > install.sh
+rm -r "$tmp_dir"
+chmod +x install.sh
+./install.sh --ssh
+```
+
+`--ssh` may be left off: a download that fails falls back to ssh by itself when
+root has a key to try. The fetch stops for nothing — an install reached through
+a pipe has no terminal to answer a prompt on — so a key with a passphrase needs
+an agent, and the host key has to be known already. When it fails, this says
+what it is stuck on:
+
+```sh
+git ls-remote git@github.com:tmemelink/garbage-collection-automation.git
+```
+
+With a token instead — a fine-grained one, read access to this repository's
+contents — https works for both halves:
+
+```sh
+export GITHUB_TOKEN=github_pat_...
+curl -fsSL -H "Authorization: Bearer ${GITHUB_TOKEN}" \
+  https://raw.githubusercontent.com/tmemelink/garbage-collection-automation/main/install.sh \
+  | bash
+```
+
+The installer picks `GITHUB_TOKEN` up from the environment for its own download
+too. Re-running it to upgrade needs it again: nothing it writes into the
+container keeps a copy.
+
 ### Installer options
 
 The installer is idempotent — re-run it to upgrade. It never overwrites an
@@ -157,6 +192,7 @@ repaired by running it again.
 | ---------------------------------------------- | -------------------------------------------------------------------- |
 | `--ref <git-ref>`                              | Install a specific branch, tag or commit (default `main`)            |
 | `--source <path>`                              | Install from a local directory or tarball instead of downloading     |
+| `--ssh`                                        | Fetch the source over ssh rather than https, for a private repository |
 | `--no-schedule`                                | Install without adding the cron entry                                |
 | `--no-web`                                     | Install without the web interface service (and remove it if present) |
 | `--postcode` / `--house-number` / `--addition` | The address, answered in advance                                     |
@@ -166,10 +202,12 @@ repaired by running it again.
 | `--uninstall`                                  | Remove app, user and schedule; keeps config, state and logs          |
 
 
-Set `GITHUB_TOKEN` if the repository is private. `APP_USER`, `INSTALL_DIR`,
-`CONFIG_DIR`, `STATE_DIR`, `LOG_DIR`, `HOME_CMD_DIR` (the folder the by-hand
-commands go in, `~/garbage-collection` by default), `HOME_CMD` and
-`HOME_WEB_CMD` can be overridden through the environment.
+Set `GITHUB_TOKEN` if the repository is private and there is no key to use
+instead. `APP_USER`, `INSTALL_DIR`, `CONFIG_DIR`, `STATE_DIR`, `LOG_DIR`,
+`HOME_CMD_DIR` (the folder the by-hand commands go in, `~/garbage-collection` by
+default), `HOME_CMD`, `HOME_WEB_CMD`, `REPO` and `SSH_URL` (the address `--ssh`
+fetches from, `git@github.com:$REPO.git` by default) can be overridden through
+the environment.
 
 ### What it installs where
 

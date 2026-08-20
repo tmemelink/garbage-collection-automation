@@ -7,6 +7,7 @@ recommendation is made of can be checked here without a hypervisor.
 
 from __future__ import annotations
 
+import os
 import re
 import shutil
 import subprocess
@@ -21,9 +22,13 @@ README = REPO_ROOT / "README.md"
 pytestmark = pytest.mark.skipif(shutil.which("bash") is None, reason="needs bash")
 
 
-def create(*args) -> subprocess.CompletedProcess:
+def create(*args, env: dict | None = None) -> subprocess.CompletedProcess:
     return subprocess.run(
-        [str(CREATE), "--dry-run", *args], capture_output=True, text=True, cwd=REPO_ROOT
+        [str(CREATE), "--dry-run", *args],
+        capture_output=True,
+        text=True,
+        cwd=REPO_ROOT,
+        env=env,
     )
 
 
@@ -118,6 +123,24 @@ def test_install_is_shown_in_the_dry_run_too():
     assert result.returncode == 0, result.stderr
     assert "pct exec 120" in result.stdout
     assert "install.sh" in result.stdout
+
+
+def test_a_token_gets_the_install_into_a_private_repository():
+    """Both halves of the install are downloads, and both 404 without credentials."""
+    result = create("--vmid", "120", "--install", env={**os.environ, "GITHUB_TOKEN": "s3cret"})
+
+    assert result.returncode == 0, result.stderr
+    assert "pct push 120" in result.stdout, "the token has to reach the container somehow"
+    assert "Authorization: Bearer" in result.stdout
+
+
+def test_the_token_itself_is_in_none_of_the_commands():
+    """A command line is read by every process list it passes through, and by this."""
+    result = create("--vmid", "120", "--install", env={**os.environ, "GITHUB_TOKEN": "s3cret"})
+
+    assert result.returncode == 0, result.stderr
+    assert "s3cret" not in result.stdout
+    assert "s3cret" not in result.stderr
 
 
 def test_it_refuses_to_run_anywhere_that_is_not_a_proxmox_host():

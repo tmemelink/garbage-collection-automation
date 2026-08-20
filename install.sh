@@ -7,6 +7,10 @@
 #
 #   curl -fsSL https://raw.githubusercontent.com/tmemelink/garbage-collection-automation/main/install.sh | bash
 #
+# While the repository is private that URL answers 404 to anyone without
+# credentials, and so does the download the installer does next. Fetch this file
+# over ssh (see the README) and run it with --ssh, or set GITHUB_TOKEN.
+#
 # Re-running upgrades an existing install in place; the config file is never
 # overwritten. Run with --uninstall to remove everything except the config.
 
@@ -22,6 +26,11 @@ LOG_DIR="${LOG_DIR:-/var/log/${APP_NAME}}"
 REPO="${REPO:-tmemelink/garbage-collection-automation}"
 REF="${REF:-main}"
 SOURCE="${SOURCE:-}"          # local dir or tarball; skips the download when set
+SSH_URL="${SSH_URL:-git@github.com:${REPO}.git}"
+FETCH_SSH=0                   # 1 with --ssh: fetch over ssh instead of https
+# ssh must not stop to ask anything: an install reached through a pipe or
+# `pct exec` has no terminal to answer on, and a prompt there is a hang.
+export GIT_SSH_COMMAND="${GIT_SSH_COMMAND:-ssh -o BatchMode=yes}"
 INSTALL_SCHEDULE=1
 INSTALL_WEB=1
 RUN_NOW=""                    # "" ask when there is a terminal, 1 always, 0 never
@@ -71,6 +80,10 @@ Usage: install.sh [options]
   --ref <git-ref>     Branch, tag or commit to install (default: main)
   --source <path>     Install from a local directory or tarball instead of
                       downloading; use this for air-gapped installs.
+  --ssh               Fetch the source over ssh (git@github.com) rather than
+                      https, for a private repository this host holds a key
+                      for. Without it an https download that fails falls back
+                      to ssh anyway when there is a key to try.
   --no-schedule       Install the application but do not add the cron entry.
   --no-web            Install the application but not the web interface service.
                       The port and whether it listens are [web] in config.toml.
@@ -91,8 +104,8 @@ Usage: install.sh [options]
 
 Environment overrides: APP_USER, INSTALL_DIR, CONFIG_DIR, STATE_DIR, LOG_DIR,
 HOME_CMD_DIR (the folder the by-hand commands go in, default
-~/garbage-collection), HOME_CMD, HOME_WEB_CMD, REPO, GITHUB_TOKEN (for private
-repositories).
+~/garbage-collection), HOME_CMD, HOME_WEB_CMD, REPO, SSH_URL, GITHUB_TOKEN
+(either of the last two gets into a private repository).
 USAGE
 }
 
@@ -101,6 +114,7 @@ parse_args() {
         case "$1" in
             --ref)         REF="${2:?--ref needs a value}"; shift 2 ;;
             --source)      SOURCE="${2:?--source needs a value}"; shift 2 ;;
+            --ssh)         FETCH_SSH=1; shift ;;
             --no-schedule) INSTALL_SCHEDULE=0; shift ;;
             --no-web)      INSTALL_WEB=0; shift ;;
             --postcode)    POSTCODE="$(squeeze "${2:?--postcode needs a value}")"
@@ -173,12 +187,24 @@ check_platform() {
     fi
 }
 
+apt_install() {
+    export DEBIAN_FRONTEND=noninteractive
+    apt-get install -y -qq --no-install-recommends "$@" >/dev/null
+}
+
 install_prereqs() {
     log "installing system packages"
-    export DEBIAN_FRONTEND=noninteractive
     apt-get update -qq
     # tzdata: due times are Europe/Amsterdam, and zoneinfo reads the system database.
-    apt-get install -y -qq --no-install-recommends ca-certificates curl tar cron tzdata >/dev/null
+    apt_install ca-certificates curl tar cron tzdata
+}
+
+# git is worth carrying only on a host that fetches its source over ssh, so it is
+# installed where that turns out to be the way in rather than with the rest.
+ensure_git() {
+    command -v git >/dev/null 2>&1 && return 0
+    log "installing git for the ssh fetch"
+    apt_install git openssh-client
 }
 
 install_uv() {
@@ -205,20 +231,75 @@ fetch_source() {
         fi
         [ -f "$SOURCE" ] || die "--source '${SOURCE}' is neither a directory nor a file"
         log "installing from local tarball ${SOURCE}"
-        tar -xzf "$SOURCE" -C "$TMPDIR_CLEANUP"
+        mkdir -p "${TMPDIR_CLEANUP}/tarball"
+        tar -xzf "$SOURCE" -C "${TMPDIR_CLEANUP}/tarball"
+        SRC_DIR="$(extracted_tree "${TMPDIR_CLEANUP}/tarball")"
     else
-        log "downloading ${REPO}@${REF}"
-        local url="https://codeload.github.com/${REPO}/tar.gz/${REF}"
-        local -a auth=()
-        [ -n "${GITHUB_TOKEN:-}" ] && auth=(-H "Authorization: Bearer ${GITHUB_TOKEN}")
-        curl -fsSL "${auth[@]}" "$url" -o "${TMPDIR_CLEANUP}/src.tar.gz" \
-            || die "download failed - check that ref '${REF}' exists and the repo is reachable"
-        tar -xzf "${TMPDIR_CLEANUP}/src.tar.gz" -C "$TMPDIR_CLEANUP"
+        download_source
     fi
 
-    SRC_DIR="$(find "$TMPDIR_CLEANUP" -mindepth 1 -maxdepth 1 -type d | head -n1)"
     [ -n "$SRC_DIR" ] && [ -f "${SRC_DIR}/pyproject.toml" ] \
         || die "extracted source does not look like the project (no pyproject.toml)"
+}
+
+# A tarball holds its tree in one directory named after the ref; which name that
+# is, is the archive's business rather than ours.
+extracted_tree() { find "$1" -mindepth 1 -maxdepth 1 -type d | head -n1; }
+
+# GitHub answers an unauthenticated request for a private repository with a 404 -
+# the same answer a ref that does not exist gets - so a failed download cannot say
+# which of the two it was. It can only say what the ways in are.
+download_source() {
+    if [ "$FETCH_SSH" = 1 ]; then
+        fetch_over_ssh \
+            || die "ssh fetch failed - is ${SSH_URL} readable with the key this host holds?" \
+                   "What it is stuck on: git ls-remote ${SSH_URL}"
+        return
+    fi
+
+    download_over_https && return
+
+    # Falling back is only worth it where there is a key to fall back on: without
+    # one this was a public repository, and the ref is the thing that was wrong.
+    if has_ssh_key; then
+        warn "https download failed; trying ssh, this host has a key"
+        fetch_over_ssh && return
+    fi
+    die "download failed - either ref '${REF}' does not exist," \
+        "or the repository is private and this host gave no credentials:" \
+        "set GITHUB_TOKEN, or pass --ssh with a key GitHub knows, or --source a local copy."
+}
+
+download_over_https() {
+    log "downloading ${REPO}@${REF}"
+    local url="https://codeload.github.com/${REPO}/tar.gz/${REF}"
+    local -a auth=()
+    [ -n "${GITHUB_TOKEN:-}" ] && auth=(-H "Authorization: Bearer ${GITHUB_TOKEN}")
+    curl -fsSL "${auth[@]}" "$url" -o "${TMPDIR_CLEANUP}/src.tar.gz" || return 1
+    mkdir -p "${TMPDIR_CLEANUP}/download"
+    tar -xzf "${TMPDIR_CLEANUP}/src.tar.gz" -C "${TMPDIR_CLEANUP}/download"
+    SRC_DIR="$(extracted_tree "${TMPDIR_CLEANUP}/download")"
+}
+
+# The other way into a private repository: a key GitHub knows, rather than a
+# token. One shallow fetch of the one ref is all that is wanted, and `git archive`
+# hands over the tree without the .git directory that would otherwise be installed.
+fetch_over_ssh() {
+    ensure_git || return 1
+    export HOME="${HOME:-$HOME_BASE_DIR}"   # ssh reads the key from ~/.ssh
+    log "fetching ${SSH_URL}@${REF} over ssh"
+    local work="${TMPDIR_CLEANUP}/git" tree="${TMPDIR_CLEANUP}/ssh/${APP_NAME}"
+    mkdir -p "$work" "$tree"
+    git -C "$work" init -q || return 1
+    git -C "$work" fetch -q --depth=1 "$SSH_URL" "$REF" || return 1
+    git -C "$work" archive FETCH_HEAD | tar -x -C "$tree" || return 1
+    SRC_DIR="$tree"
+}
+
+# Whether this host has an ssh identity at all: an agent, or a key of root's.
+has_ssh_key() {
+    [ -n "${SSH_AUTH_SOCK:-}" ] && return 0
+    compgen -G "${HOME:-$HOME_BASE_DIR}/.ssh/id_*" >/dev/null
 }
 
 create_user() {

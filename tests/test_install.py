@@ -123,6 +123,202 @@ def source(tmp_path):
     return src
 
 
+# --- where the source comes from ------------------------------------------------------
+
+
+def fetch_step(tmp_path, source, *, stubs="", **overrides):
+    """Run `fetch_source` with these stand-ins in place of curl and git.
+
+    The tree it fetches lives in a temporary directory the step deletes on its way
+    out, so the step is what looks inside: where it ended up and what it holds is
+    printed for the test to read.
+    """
+    overrides.setdefault("HOME", str(tmp_path / "keyless-home"))
+    step = (
+        f"{stubs}\n"
+        "fetch_source\n"
+        'echo "src=[${SRC_DIR}]"\n'
+        'find "$SRC_DIR" -mindepth 1 -maxdepth 1 -printf "holds=[%f]\\n"'
+    )
+    return run_step(step, tmp_path, source, **overrides)
+
+
+def call_log(tmp_path):
+    """What the stubbed curl and git were handed."""
+    path = tmp_path / "fetch-calls"
+    return path, path.read_text() if path.exists() else ""
+
+
+def stub_curl(tmp_path, *, tarball=None):
+    """A curl that fails like a 404 does, unless it is given a tarball to hand over."""
+    log, _ = call_log(tmp_path)
+    hands_over = f'cp "{tarball}" "${{TMPDIR_CLEANUP}}/src.tar.gz"' if tarball else "return 22"
+    return f'curl() {{ echo "curl $*" >> "{log}"; {hands_over}; }}'
+
+
+def stub_git(tmp_path, source, *, fails=False):
+    """A git that says what it was asked, and archives the source tree for real."""
+    log, _ = call_log(tmp_path)
+    return textwrap.dedent(f"""
+        git() {{
+            echo "git $*" >> "{log}"
+            case "$*" in
+                *fetch*) {"return 128" if fails else ":"} ;;
+                *archive*) tar -c -C "{source}" . ;;
+            esac
+        }}
+    """)
+
+
+def tarball_of(tmp_path, source):
+    """The source tree packed the way codeload packs it: one directory at the top."""
+    archive = tmp_path / "codeload.tar.gz"
+    subprocess.run(
+        ["tar", "-czf", str(archive), "-C", str(source.parent), source.name],
+        check=True,
+        timeout=60,
+    )
+    return archive
+
+
+def test_a_download_that_cannot_get_in_says_what_the_ways_in_are(tmp_path, source):
+    """A private repository 404s exactly like a missing ref; the error cannot guess."""
+    result = fetch_step(tmp_path, source, stubs=stub_curl(tmp_path))
+
+    assert result.returncode == 1
+    assert "GITHUB_TOKEN" in result.stderr
+    assert "--ssh" in result.stderr
+    assert "--source" in result.stderr
+
+
+def test_the_token_reaches_the_download_that_needs_it(tmp_path, source):
+    """Without the header a private repository answers 404 and the install stops."""
+    result = fetch_step(
+        tmp_path,
+        source,
+        stubs=stub_curl(tmp_path, tarball=tarball_of(tmp_path, source)),
+        GITHUB_TOKEN="s3cret",
+    )
+
+    assert result.returncode == 0, result.stderr
+    _, calls = call_log(tmp_path)
+    assert "Authorization: Bearer s3cret" in calls
+    assert f"/download/{source.name}]" in result.stdout, "the tarball's own directory"
+    assert "holds=[pyproject.toml]" in result.stdout
+
+
+def test_a_download_without_a_token_sends_no_header(tmp_path, source):
+    """An empty header is not a header; curl would send `Authorization:` and mean it."""
+    result = fetch_step(
+        tmp_path, source, stubs=stub_curl(tmp_path, tarball=tarball_of(tmp_path, source))
+    )
+
+    assert result.returncode == 0, result.stderr
+    _, calls = call_log(tmp_path)
+    assert "Authorization" not in calls
+
+
+@pytest.mark.skipif(shutil.which("git") is None, reason="needs git")
+def test_ssh_installs_the_ref_and_not_the_repository_around_it(tmp_path, source):
+    """--ssh is the way into a private repository from a host GitHub knows by key.
+
+    The remote here is a local repository rather than github.com - what is under
+    test is that the fetch takes one ref and the install gets a source tree, not
+    a checkout with a .git directory in it.
+    """
+    origin = tmp_path / "origin"
+    shutil.copytree(source, origin)
+    for command in (
+        ["git", "init", "-q", "-b", "main", "."],
+        ["git", "add", "-A"],
+        ["git", "-c", "user.email=t@e", "-c", "user.name=t", "commit", "-qm", "one"],
+    ):
+        subprocess.run(command, cwd=origin, check=True, timeout=60)
+
+    result = fetch_step(tmp_path, source, FETCH_SSH="1", SSH_URL=str(origin), REF="main")
+
+    assert result.returncode == 0, result.stderr
+    assert "/ssh/garbage-collection-automation]" in result.stdout
+    assert "holds=[pyproject.toml]" in result.stdout
+    assert "holds=[.git]" not in result.stdout, "the container has no use for the history"
+
+
+def test_ssh_asks_for_the_repository_the_key_opens(tmp_path, source):
+    """REPO is a GitHub path; over ssh that is a different URL for the same thing."""
+    result = fetch_step(
+        tmp_path,
+        source,
+        stubs=stub_git(tmp_path, source),
+        FETCH_SSH="1",
+        REPO="tmemelink/garbage-collection-automation",
+        SSH_URL="git@github.com:tmemelink/garbage-collection-automation.git",
+        REF="v0.1.0",
+    )
+
+    assert result.returncode == 0, result.stderr
+    _, calls = call_log(tmp_path)
+    assert (
+        "fetch -q --depth=1 git@github.com:tmemelink/garbage-collection-automation.git v0.1.0"
+        in calls
+    )
+
+
+def test_an_ssh_fetch_that_fails_names_the_command_that_says_why(tmp_path, source):
+    """BatchMode turns a key problem into a failure rather than a prompt nobody sees."""
+    result = fetch_step(
+        tmp_path,
+        source,
+        stubs=stub_git(tmp_path, source, fails=True),
+        FETCH_SSH="1",
+        SSH_URL="git@github.com:tmemelink/private.git",
+    )
+
+    assert result.returncode == 1
+    assert "git ls-remote git@github.com:tmemelink/private.git" in result.stderr
+
+
+def test_a_failed_download_falls_back_to_the_key_this_host_holds(tmp_path, source):
+    """The one-liner does not carry --ssh; a host with a key should still install."""
+    home = tmp_path / "home-with-key"
+    (home / ".ssh").mkdir(parents=True)
+    (home / ".ssh" / "id_ed25519").write_text("not really a key\n")
+
+    result = fetch_step(
+        tmp_path,
+        source,
+        stubs=stub_curl(tmp_path) + stub_git(tmp_path, source),
+        HOME=str(home),
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "trying ssh" in result.stderr
+    assert "/ssh/garbage-collection-automation]" in result.stdout
+
+
+def test_without_a_key_nothing_is_attempted_over_ssh(tmp_path, source):
+    """A public install with a mistyped ref should fail on the ref, not on ssh."""
+    result = fetch_step(tmp_path, source, stubs=stub_curl(tmp_path) + stub_git(tmp_path, source))
+
+    assert result.returncode == 1
+    _, calls = call_log(tmp_path)
+    assert "git -C" not in calls, "there was no key to try it with"
+
+
+def test_git_is_carried_only_by_the_host_that_fetches_over_ssh(tmp_path, source):
+    """Everything installed here outlives the install; the tarball route needs neither."""
+    log, _ = call_log(tmp_path)
+    result = run_step(
+        f'apt-get() {{ :; }}\napt_install() {{ echo "apt $*" >> "{log}"; }}\ninstall_prereqs',
+        tmp_path,
+        source,
+    )
+
+    assert result.returncode == 0, result.stderr
+    _, calls = call_log(tmp_path)
+    assert "curl" in calls and "cron" in calls
+    assert "git" not in calls, "an install from a tarball never runs git"
+
+
 def test_the_lockfile_reaches_the_install_dir(tmp_path, source):
     """Without it `uv sync` re-resolves and the air-gapped install is not reproducible."""
     result = run_step("install_app", tmp_path, source)

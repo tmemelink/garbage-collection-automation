@@ -75,7 +75,9 @@ Usage: create-container.sh --vmid <id> [options]     (run on the Proxmox host)
   --dry-run            Print what would run, touch nothing
   -h, --help           Show this help
 
-Environment: REPO and REF choose what --install downloads.
+Environment: REPO and REF choose what --install downloads, and GITHUB_TOKEN
+gets it into a private one - it is handed to the container through a file rather
+than a command line, and the container deletes it as it reads it.
 USAGE
 }
 
@@ -205,8 +207,29 @@ start_container() {
 install_app() {
     [ "$DO_INSTALL" -eq 1 ] || return 0
     log "installing ${APP_NAME} in container ${VMID}"
+    if [ -n "${GITHUB_TOKEN:-}" ]; then
+        install_from_private_repo
+        return
+    fi
     run pct exec "$VMID" -- bash -c \
         "curl -fsSL https://raw.githubusercontent.com/${REPO}/${REF}/install.sh | bash"
+}
+
+# A private repository answers both halves of that - the installer and the source
+# it downloads - with a 404 unless the request carries a token. The token travels
+# in a file rather than in the command: `pct exec`'s arguments are readable in the
+# host's process list and in the container's, and a --dry-run prints them.
+install_from_private_repo() {
+    local remote="/root/.${APP_NAME}-token" carrier
+    carrier="$(mktemp)"
+    chmod 600 "$carrier"
+    [ "$DRY_RUN" -eq 1 ] || printf '%s' "$GITHUB_TOKEN" > "$carrier"
+    run pct push "$VMID" "$carrier" "$remote" --perms 600
+    rm -f "$carrier"
+    run pct exec "$VMID" -- bash -c \
+        "export GITHUB_TOKEN=\$(cat ${remote}); rm -f ${remote}; \
+curl -fsSL -H \"Authorization: Bearer \${GITHUB_TOKEN}\" \
+https://raw.githubusercontent.com/${REPO}/${REF}/install.sh | bash"
 }
 
 summary() {
@@ -229,6 +252,7 @@ SUMMARY
     else
         cat <<SUMMARY
   Install        pct exec ${VMID} -- bash -c 'curl -fsSL https://raw.githubusercontent.com/${REPO}/${REF}/install.sh | bash'
+                 (a private repository needs credentials; see the README)
 
 SUMMARY
     fi
