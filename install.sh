@@ -356,9 +356,10 @@ install_app() {
     ( cd "$INSTALL_DIR" && "$UV_BIN" sync --no-dev --quiet )
 
     # The service user has to read the tree and execute the interpreter the venv
-    # points at, both of which live outside its home.
-    chown -R "${APP_USER}:${APP_USER}" "$INSTALL_DIR"
-    chmod -R a+rX "$INSTALL_DIR"
+    # points at, but it must not be able to replace the code it executes. An
+    # upgrade runs as root and is the only writer the application tree needs.
+    chown -R root:root "$INSTALL_DIR"
+    chmod -R u=rwX,go=rX "$INSTALL_DIR"
     if [ -d "$UV_PYTHON_INSTALL_DIR" ]; then
         chmod a+rX "$(dirname "$UV_PYTHON_INSTALL_DIR")"
         chmod -R a+rX "$UV_PYTHON_INSTALL_DIR"

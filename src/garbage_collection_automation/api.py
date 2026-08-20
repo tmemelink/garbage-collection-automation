@@ -31,6 +31,7 @@ import fcntl
 import logging
 import os
 import threading
+import tomllib
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -79,6 +80,10 @@ class Busy(Exception):
 
 class ApiError(Exception):
     """The request was understood and refused. The message is shown on the page."""
+
+
+class _CannotMaskSecret(Exception):
+    """A valid file uses a representation that cannot be safely redacted in place."""
 
 
 @dataclass(frozen=True)
@@ -179,12 +184,9 @@ def _config_file_payload(paths: Paths) -> dict:
         log.warning("cannot read %s to show it: %s", paths.config, exc)
         return _panel(paths, error=f"cannot read {paths.config}: {exc.strerror or exc}")
 
-    truncated = len(text) > MAX_CONFIG_BYTES
-    if truncated:
-        text = text[:MAX_CONFIG_BYTES] + "\n# ... the rest is not shown\n"
-
-    text, masked = _without_the_secrets(text, paths.config)
-    if text is None:
+    try:
+        text, masked = _without_the_secrets(text, paths.config)
+    except ConfigError:
         return _panel(
             paths,
             modified=modified,
@@ -193,6 +195,22 @@ def _config_file_payload(paths: Paths) -> dict:
                 f"from a setting and none of it is shown here; read it on the machine itself"
             ),
         )
+    except _CannotMaskSecret:
+        return _panel(
+            paths,
+            modified=modified,
+            error=(
+                f"{paths.config} uses an escaped or multiline representation for a secret, "
+                "so it cannot be masked safely and none of the file is shown here; read it "
+                "on the machine itself"
+            ),
+        )
+
+    # Redact the complete document before cutting it down. A secret below the
+    # display limit must never become visible merely because that limit changes.
+    truncated = len(text) > MAX_CONFIG_BYTES
+    if truncated:
+        text = text[:MAX_CONFIG_BYTES] + "\n# ... the rest is not shown\n"
     return _panel(paths, modified=modified, text=text, masked=masked, truncated=truncated)
 
 
@@ -221,7 +239,7 @@ def _panel(
     }
 
 
-def _without_the_secrets(text: str, path: Path) -> tuple[str | None, bool]:
+def _without_the_secrets(text: str, path: Path) -> tuple[str, bool]:
     """*text* with every secret the file itself holds replaced by a mask.
 
     The values are taken from the parsed document rather than matched with a
@@ -229,19 +247,18 @@ def _without_the_secrets(text: str, path: Path) -> tuple[str | None, bool]:
     over ``key = "value"`` would leave one that had been written a second time
     somewhere unexpected.
 
-    That is also why a file too broken to parse comes back as ``None`` rather
-    than as itself: nothing here can then say which of it is a secret, and a
-    panel that is safe to screenshot except on the days the file is broken is
-    not a panel that is safe to screenshot.
+    A file too broken to parse raises ``ConfigError``. A valid file whose parsed
+    secret does not occur verbatim in its source raises ``_CannotMaskSecret``:
+    TOML escape sequences and multiline strings can represent a value without
+    writing those characters contiguously, so a plain replacement would leave
+    the secret readable in its encoded form. In either case the caller withholds
+    the whole document.
 
     Secrets that live in the environment are not in the file, so there is
     nothing to mask; what is in the file is masked whether or not it is the
     value being used.
     """
-    try:
-        document = configuration.read_toml(path)
-    except ConfigError:
-        return None, False
+    document = configuration.read_toml(path)
 
     secrets = (
         document.get("collection", {}).get("api_key"),
@@ -250,8 +267,26 @@ def _without_the_secrets(text: str, path: Path) -> tuple[str | None, bool]:
     masked = False
     for secret in secrets:
         if isinstance(secret, str) and secret.strip():
+            masked = masked or secret in text
             text = text.replace(secret, _mask(secret))
-            masked = True
+
+    # Finding the decoded value somewhere in the file is not enough: an escaped
+    # value could remain on its assignment while the same plaintext happened to
+    # occur in a comment. Parse the redacted text and prove that neither secret
+    # field still resolves to what it held before it is returned to the page.
+    try:
+        redacted = tomllib.loads(text)
+    except tomllib.TOMLDecodeError as exc:
+        raise _CannotMaskSecret from exc
+    remaining = (
+        redacted.get("collection", {}).get("api_key"),
+        redacted.get("export", {}).get("todoist", {}).get("token"),
+    )
+    if any(
+        isinstance(secret, str) and secret.strip() and after == secret
+        for secret, after in zip(secrets, remaining, strict=True)
+    ):
+        raise _CannotMaskSecret
     return text, masked
 
 
@@ -292,7 +327,7 @@ def _cron_line(cron_path: Path) -> str | None:
     """The five schedule fields out of the crontab, or None when there is no file.
 
     A checkout has none - install.sh is what writes it - and neither has a
-    container where the job was installed with --no-cron.
+    container where the job was installed with --no-schedule.
     """
     try:
         text = cron_path.read_text(encoding="utf-8")
@@ -349,7 +384,7 @@ def check(config: Config, paths: Paths) -> dict:
 
 
 def apply(config: Config, paths: Paths) -> dict:
-    """The real run: write the to-dos and record them. What cron does every morning."""
+    """The real run: write the to-dos and record them. What the weekly cron job does."""
     with _locked(paths), _captured() as lines:
         result = application.run(config, state_path=paths.state, dry_run=False)
     return _action_payload(result, config, paths, lines)
@@ -398,6 +433,12 @@ def save_config(payload: dict, paths: Paths) -> dict:
     The running server keeps serving the configuration it started with: [web]
     only takes effect at startup, and the pipeline reads the file per action.
     """
+    with _locked(paths):
+        return _save_config(payload, paths)
+
+
+def _save_config(payload: dict, paths: Paths) -> dict:
+    """The save transaction, called only while the shared run lock is held."""
     unknown = sorted(set(payload) - FORM_FIELDS)
     if unknown:
         raise ApiError(f"unknown field(s): {', '.join(unknown)}")

@@ -180,17 +180,16 @@ class Todoist:
         return task_id
 
     def update_task(self, task_id: str, collection: Collection) -> None:
-        """Rewrite an existing todo so it says what *collection* says.
+        """Refresh the parts of an existing todo that this project owns.
 
-        The labels are left exactly as they are: ours is already among them -
-        that is how the todo was found - and sending a list would drop any a
-        person has added of their own.
+        The content and description are left exactly as they are: the marker in
+        the latter already identifies this same collection, and either may have
+        been edited by a person. The labels stay untouched for the same reason;
+        ours is already among them, since that is how the todo was found.
         """
         self._post(
             f"tasks/{task_id}",
             {
-                "content": _content(collection),
-                "description": _description(collection),
                 "due_datetime": _due(collection.due_at(self._due_time)),
             },
         )

@@ -465,8 +465,8 @@ def test_a_call_that_answers_with_nothing_at_all_is_still_an_answer():
     assert len(api.calls("POST tasks/42")) == 1
 
 
-def test_a_rewrite_leaves_the_labels_a_person_added_alone():
-    """Ours is already on it - that is how it was found - and sending a list replaces them."""
+def test_a_rewrite_leaves_the_persons_content_description_and_labels_alone():
+    """The marker already identifies it; sending any of these would replace a person's edits."""
     api = Api(
         {
             "POST tasks/42": reply({"id": "42"}),
@@ -478,7 +478,8 @@ def test_a_rewrite_leaves_the_labels_a_person_added_alone():
 
     sent = body(api.calls("POST tasks/42")[0])
     assert "labels" not in sent
-    assert sent["content"] == "Restafval buitenzetten"
+    assert "content" not in sent
+    assert "description" not in sent
     assert sent["due_datetime"] == "2026-08-20T05:00:00Z"
 
 

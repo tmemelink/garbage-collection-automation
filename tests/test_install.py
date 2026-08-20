@@ -1211,3 +1211,17 @@ def test_a_run_that_fails_does_not_fail_the_install(tmp_path, source):
 
     assert result.returncode == 0, result.stderr
     assert "the install itself is fine" in result.stderr
+
+
+def test_the_runtime_user_cannot_modify_the_code_it_executes(tmp_path, source):
+    module = source / "src" / "garbage_collection_automation" / "__init__.py"
+    # A local checkout may itself be group-writable; the installed copy must not inherit that.
+    module.chmod(0o664)
+
+    result = run_step("install_app", tmp_path, source)
+
+    assert result.returncode == 0, result.stderr
+    installed = tmp_path / "opt"
+    assert f"chown -R root:root {installed}" in ownership_log(tmp_path).read_text()
+    installed_module = installed / "src" / "garbage_collection_automation" / "__init__.py"
+    assert installed_module.stat().st_mode & 0o777 == 0o644

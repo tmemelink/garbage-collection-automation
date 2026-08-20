@@ -34,9 +34,9 @@ longer agrees:
 | ----------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------ |
 | The same collections as last time                     | Nothing at all — Todoist is not called                                                                             |
 | A date added, moved or no longer collected            | Asks Todoist what it holds, works out the difference, applies it                                                   |
-| `due_time`, `project`, `section` or `remind_days_before` changed | The same, and rewrites every todo that stays                                                                       |
+| `due_time`, `project`, `section` or `remind_days_before` changed | The same, and refreshes the managed fields of every todo that stays                                                 |
 | No state file, or one it cannot read                  | The same; a missing record is a reason to ask                                                                      |
-| A previous run that stopped halfway                   | The same, and rewrites every todo that stays; what got through was recorded, but only Todoist can say what did not |
+| A previous run that stopped halfway                   | The same, and refreshes every todo that stays; what got through was recorded, but only Todoist can say what did not |
 
 
 The state file determines *whether* to ask. However, the update delta is always
@@ -68,8 +68,9 @@ again and moved back on the next rewrite. With no `section` configured, where
 inside the project a todo sits is left to you. The **marker** in the description is
 how a run knows which collection a todo stands for — rename the line above it
 and it is still recognised, delete the marker and the todo is left alone from
-then on, untouched and unmanaged. Everything else — the content, the reminder
-you add yourself, the labels you add yourself — is yours.
+then on, untouched and unmanaged. Everything else — the content, any extra text
+around the marker, the reminder you add yourself, the labels you add yourself —
+is yours.
 
 Custom reminders are a Todoist Pro feature. On an account without it Todoist
 answers `403` to every reminder, so a run says so once, writes its to-dos with

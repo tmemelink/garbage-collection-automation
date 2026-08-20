@@ -798,3 +798,37 @@ def test_the_level_it_lowered_is_the_one_it_puts_back(paths):
         assert logger.level == logging.ERROR
     finally:
         logger.setLevel(logging.NOTSET)
+
+
+# Regression tests added after the baseline-scanned fixtures above so their line
+# numbers stay stable when this release hardening grows.
+
+
+def test_a_secret_encoded_with_toml_escapes_withholds_the_whole_panel(paths):
+    """The decoded value is not present in the source for a plain replacement to find."""
+    paths.config.write_text(
+        MINIMAL_CONFIG.replace(
+            "[collection]",
+            '[collection]\napi_key = "escaped-\\u0073ecret-value"'  # pragma: allowlist secret
+            "\n# The decoded words occurring elsewhere must not fool the redactor: "
+            "escaped-secret-value",
+        )
+    )
+    expected = "escaped-secret-value"  # pragma: allowlist secret
+    assert configuration.load(paths.config).collection.api_key == expected
+
+    shown = api.state_payload(configuration.load(paths.config), paths)["config_file"]
+
+    assert shown["text"] is None
+    assert "escaped-secret-value" not in str(shown)
+    assert "\\u0073" not in str(shown)
+    assert "cannot be masked safely" in shown["error"]
+
+
+def test_a_save_cannot_rewrite_the_configuration_during_a_run(paths):
+    before = paths.config.read_text()
+
+    with api._locked(paths), pytest.raises(api.Busy, match="another action"):
+        api.save_config({"lookahead_days": 45}, paths)
+
+    assert paths.config.read_text() == before

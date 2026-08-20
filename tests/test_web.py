@@ -634,7 +634,15 @@ def test_the_stop_button_ends_the_process_the_way_a_signal_does(tmp_path, write_
     )
 
     process = subprocess.Popen(
-        [sys.executable, "-m", "garbage_collection_automation.web", "--config", str(config_file)],
+        [
+            sys.executable,
+            "-m",
+            "garbage_collection_automation.web",
+            "--config",
+            str(config_file),
+            "--state",
+            str(tmp_path / "state.json"),
+        ],
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         text=True,
