@@ -645,6 +645,36 @@ def test_a_name_that_merely_resolves_here_is_refused(client):
     assert response.status_code == 403
 
 
+def test_the_tunnels_own_port_is_this_server(client):
+    """``ssh -L 8081:127.0.0.1:8080`` makes the browser say a port we never bound."""
+    response = client.get("/api/state", headers={"Host": "127.0.0.1:8081"})
+
+    assert response.status_code == 200
+
+
+@pytest.mark.parametrize("host", ["localhost", "localhost:8081", "[::1]:8081", "127.0.0.2"])
+def test_the_other_ways_of_saying_this_machine_are_this_server(client, host):
+    response = client.get("/api/state", headers={"Host": host})
+
+    assert response.status_code == 200
+
+
+@pytest.mark.parametrize("host", ["192.168.1.10:8080", "10.0.0.1", "127.0.0.1:half"])
+def test_a_host_that_is_not_the_loopback_is_refused(client, host):
+    response = client.get("/api/state", headers={"Host": host})
+
+    assert response.status_code == 403
+
+
+def test_a_post_from_another_port_on_this_machine_is_refused(client):
+    """Same host, different port is still another origin, tunnel or no tunnel."""
+    response = client.post(
+        "/api/apply", json={}, headers={"Host": "127.0.0.1:8081", "Origin": "http://127.0.0.1:9000"}
+    )
+
+    assert response.status_code == 403
+
+
 def test_a_request_with_no_host_at_all_is_not_the_page_either(client):
     """HTTP/1.1 requires one and every browser sends one; its absence is not the page."""
     answer = raw_request(client, "GET /api/state HTTP/1.1\r\nConnection: close\r\n\r\n")

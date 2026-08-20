@@ -358,6 +358,11 @@ ssh -N -J root@<proxmox-host> -L 8080:127.0.0.1:8080 root@<container> # via Prox
 Then open [http://127.0.0.1:8080/](http://127.0.0.1:8080/). `curl http://127.0.0.1:8080/healthz` is the
 quickest way to tell a broken tunnel from a stopped server.
 
+The local end of the tunnel is free to be another port when 8080 is taken —
+`-L 8081:127.0.0.1:8080`, then open `http://127.0.0.1:8081/`. `localhost` works
+in place of `127.0.0.1` as well; what the endpoints refuse is a name that merely
+resolves here.
+
 The buttons run the same pipeline the weekly job runs, and differ only in how
 far they are allowed to get:
 

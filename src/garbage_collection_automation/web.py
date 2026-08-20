@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import argparse
 import errno
+import ipaddress
 import json
 import logging
 import signal
@@ -316,23 +317,30 @@ class Handler(BaseHTTPRequestHandler):
         website the browser happens to have open. Three cheap checks, and a
         request is refused unless it passes all of them:
 
-        * ``Host`` must be the address the page is actually served on, which is
-          what stops a hostname that resolves to 127.0.0.1 from being used as a
-          way in - the classic DNS rebinding trick. A request with no ``Host``
-          at all is refused too: HTTP/1.1 requires one and every browser sends
-          one, so its absence is as good as a name we do not answer to.
-        * ``Origin``, when the browser sends one, must be this server.
+        * ``Host`` must name the loopback interface - ``localhost`` or a
+          loopback address - which is what stops a hostname that resolves to
+          127.0.0.1 from being used as a way in: the classic DNS rebinding
+          trick needs the browser to send a name its owner controls, and a
+          literal address is nobody's to point anywhere. The port is not part
+          of that question - the request already arrived on this socket - and
+          checking it would refuse the tunnel, whose local end is free to be a
+          different port from the one the container serves on. A request with
+          no ``Host`` at all is refused too: HTTP/1.1 requires one and every
+          browser sends one, so its absence is as good as a name we do not
+          answer to.
+        * ``Origin``, when the browser sends one, must be the same address the
+          request was addressed to, which is this page and nothing else.
         * a POST must be ``application/json``, which a form, an image or a
           navigation cannot be without a preflight this server never answers.
         """
         host = self.headers.get("Host", "")
-        if host not in self._own_names():
+        if not _is_loopback(host):
             log.warning("refused a request for host %r", host)
             self._error(HTTPStatus.FORBIDDEN, "this server is not reachable under that name")
             return False
 
         origin = self.headers.get("Origin")
-        if origin is not None and urlsplit(origin).netloc not in self._own_names():
+        if origin is not None and urlsplit(origin).netloc.lower() != host.lower():
             log.warning("refused a request from origin %r", origin)
             self._error(HTTPStatus.FORBIDDEN, "requests from another site are not accepted")
             return False
@@ -346,13 +354,6 @@ class Handler(BaseHTTPRequestHandler):
                 )
                 return False
         return True
-
-    def _own_names(self) -> set[str]:
-        """The Host values that mean this server: the address it bound, with and
-        without the port. Nothing is added for a name, because it has none."""
-        host, port = self.server.server_address[:2]
-        literal = f"[{host}]" if ":" in host else host
-        return {literal, f"{literal}:{port}"}
 
     def _body(self) -> dict | None:
         """The posted JSON object, or None once the failure has been answered."""
@@ -581,6 +582,32 @@ def serve(config: Config, *, ui_dir: Path | None = None, paths: api.Paths | None
         thread.join(timeout=CONNECTION_TIMEOUT)
         server.server_close()
     return EXIT_OK
+
+
+def _is_loopback(host: str) -> bool:
+    """Whether a ``Host`` header names the loopback interface this server is on.
+
+    ``localhost`` and the loopback addresses, and nothing that has to be looked
+    up: a name resolves to whatever its owner says it does, which is the whole
+    of the rebinding attack. The port is read only far enough to know it is a
+    number, since the page is reached through an ssh tunnel and the local end
+    of one need not use the port the container serves on.
+    """
+    if not host or any(character in host for character in "/?#@"):
+        return False
+    try:
+        split = urlsplit(f"//{host}")
+        name, _ = split.hostname, split.port  # a port that is not a number raises
+    except ValueError:
+        return False
+    if not name:
+        return False
+    if name == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(name).is_loopback
+    except ValueError:
+        return False
 
 
 def _address(host: str, port: int) -> str:
