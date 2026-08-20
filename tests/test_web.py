@@ -194,6 +194,34 @@ def test_every_answer_carries_the_security_headers(client, path):
     assert "frame-ancestors 'none'" in headers["content-security-policy"]
 
 
+@pytest.mark.parametrize(
+    "request_",
+    [
+        ("GET", "/"),
+        ("GET", "/healthz"),
+        ("GET", "/api/state"),
+        ("POST", "/api/collect"),
+        ("GET", "/nope.html"),
+        ("POST", "/api/wat"),
+    ],
+)
+def test_every_answer_ends_its_connection(client, request_):
+    """One request per connection, so the page never writes into a dead one.
+
+    A kept-alive connection is a race this server cannot win: it drops an idle
+    one after CONNECTION_TIMEOUT and has no way to say so, and a page that has
+    been open longer than that - which is every page anyone reads before
+    pressing a button - sends the press into a socket that is already gone. The
+    browser can only call that a network error, and the person is told the
+    server could not be reached by a server that is running perfectly well.
+    """
+    method, path = request_
+
+    response = client.request(method, path, json={} if method == "POST" else None)
+
+    assert response.headers["connection"] == "close"
+
+
 @pytest.mark.parametrize("method", ["PUT", "DELETE", "OPTIONS", "TRACE"])
 def test_a_method_this_server_does_not_have_is_refused_in_its_own_words(client, method):
     """The base class answers these itself - in html, and without a single header."""
@@ -326,7 +354,7 @@ def test_sigterm_stops_it_the_way_systemd_will(tmp_path, write_config):
     """The unit file's whole stop path: a signal, a clean exit, a released port.
 
     The client below stays open across the signal, the way a forgotten browser
-    tab holds a keep-alive connection: a stop drops that where it is rather than
+    tab does: a stop drops whatever is still connected where it is rather than
     waiting out CONNECTION_TIMEOUT, which the ten seconds here is what checks.
     """
     port = free_port()

@@ -97,8 +97,9 @@ SECURITY_HEADERS = {
     "Cache-Control": "no-store",
 }
 
-#: Long enough to load a page over an ssh tunnel, short enough that a forgotten
-#: connection does not hold a thread until the container is restarted.
+#: How long a connection has to send its one request. Long enough to arrive over
+#: an ssh tunnel, short enough that a socket opened and then forgotten about does
+#: not hold a thread until the container is restarted.
 CONNECTION_TIMEOUT = 30
 
 #: How long a stop waits for a run that is already inside the pipeline; see
@@ -282,11 +283,6 @@ class Handler(BaseHTTPRequestHandler):
             self._error(HTTPStatus.INTERNAL_SERVER_ERROR, "the action failed; see the log")
             return
 
-        if route == STOP_ROUTE:
-            # Nothing more will be answered on this connection, and a browser
-            # holding it open would be waiting on a socket that is going away.
-            self.close_connection = True
-
         self._json(HTTPStatus.OK, body, with_body=with_body)
 
         if route == STOP_ROUTE:
@@ -405,7 +401,6 @@ class Handler(BaseHTTPRequestHandler):
         reads one shape and one shape only, and a text/plain body in the middle
         of it is a parse error where an error message was meant to be.
         """
-        self.close_connection = True
         self._json(
             status,
             {"error": message},
@@ -453,22 +448,29 @@ class Handler(BaseHTTPRequestHandler):
         with_body: bool,
         headers: dict[str, str] | None = None,
     ) -> None:
+        # One request per connection, said out loud. A kept-alive one is a race
+        # this server cannot win: it drops an idle connection after
+        # CONNECTION_TIMEOUT without being able to say so, and a page that has
+        # been sitting open longer than that sends its next button press into a
+        # socket that is already gone - which reaches the person as a browser's
+        # "NetworkError", not as anything the page can explain. The cost is a
+        # handshake per request over loopback, for a page a single reader loads
+        # a handful of files from.
+        self.close_connection = True
         self.send_response(status)
         self.send_header("Content-Type", content_type)
-        # Always, and always accurate: it is what keeps a kept-alive connection
-        # in step about where one response ends and the next begins.
+        # Always, and always accurate: it is what tells a client that has the
+        # whole body from one that lost the rest of it.
         self.send_header("Content-Length", str(len(body)))
         for name, value in {**SECURITY_HEADERS, **(headers or {})}.items():
             self.send_header(name, value)
-        if self.close_connection:
-            self.send_header("Connection", "close")
+        self.send_header("Connection", "close")
         self.end_headers()
         if with_body:
             self.wfile.write(body)
 
     def _fail(self, status: HTTPStatus, reason: str, headers: dict[str, str] | None = None) -> None:
-        """Answer plainly and hang up; a browser is the only client here."""
-        self.close_connection = True
+        """Answer plainly; a browser is the only client here."""
         self._send(
             status,
             f"{status.value} {status.phrase}: {reason}\n".encode(),
