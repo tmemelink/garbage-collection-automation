@@ -108,32 +108,8 @@ Inside the container, as root:
 curl -fsSL https://raw.githubusercontent.com/tmemelink/garbage-collection-automation/main/install.sh | bash
 ```
 
-Or from the Proxmox host, without entering the container:
-
-```sh
-pct exec <vmid> -- bash -c 'curl -fsSL https://raw.githubusercontent.com/tmemelink/garbage-collection-automation/main/install.sh | bash'
-```
-
 Pin a tag for reproducible installs: `... | bash -s -- --ref v0.1.0`.
 
-A first install asks for the two things it cannot guess — the address to look up
-and the mijnafvalwijzer.nl app key — and writes them into `config.toml`:
-
-```
-==> Configuration. Press enter to leave one out; /etc/garbage-collection-automation/config.toml
-    then keeps the example value, and the first run says which.
-
-    Postcode [1234AB]: 1234 AB
-    House number [56]: 56
-    Addition, if any:
-    Afvalwijzer API key: ...
-```
-
-Each answer is checked as it is typed, against the same rules the application
-applies. An upgrade never asks: the config file it keeps already holds them.
-Where there is no terminal to ask on — `pct exec`, cloud-init, CI — the answers
-are the `--postcode`, `--house-number`, `--addition` and `--api-key` flags, and
-without those the example values are written and the first run says so.
 
 ### A private repository
 
@@ -158,30 +134,6 @@ chmod +x install.sh
 ./install.sh --ssh
 ```
 
-`--ssh` may be left off: a download that fails falls back to ssh by itself when
-root has a key to try. The fetch stops for nothing — an install reached through
-a pipe has no terminal to answer a prompt on — so a key with a passphrase needs
-an agent, and the host key has to be known already. When it fails, this says
-what it is stuck on:
-
-```sh
-git ls-remote git@github.com:tmemelink/garbage-collection-automation.git
-```
-
-With a token instead — a fine-grained one, read access to this repository's
-contents — https works for both halves:
-
-```sh
-export GITHUB_TOKEN=github_pat_...
-curl -fsSL -H "Authorization: Bearer ${GITHUB_TOKEN}" \
-  https://raw.githubusercontent.com/tmemelink/garbage-collection-automation/main/install.sh \
-  | bash
-```
-
-The installer picks `GITHUB_TOKEN` up from the environment for its own download
-too. Re-running it to upgrade needs it again: nothing it writes into the
-container keeps a copy.
-
 ### Installer options
 
 The installer is idempotent — re-run it to upgrade. It never overwrites an
@@ -204,13 +156,6 @@ repaired by running it again.
 | `--uninstall`                                  | Remove app, user and schedule; keeps config, state and logs          |
 
 
-Set `GITHUB_TOKEN` if the repository is private and there is no key to use
-instead. `APP_USER`, `INSTALL_DIR`, `CONFIG_DIR`, `STATE_DIR`, `LOG_DIR`,
-`HOME_CMD_DIR` (the folder the by-hand commands go in, `~/garbage-collection` by
-default), `HOME_CMD`, `HOME_WEB_CMD`, `REPO` and `SSH_URL` (the address `--ssh`
-fetches from, `git@github.com:$REPO.git` by default) can be overridden through
-the environment.
-
 ### What it installs where
 
 
@@ -226,15 +171,6 @@ the environment.
 | `/var/lib/garbage-collection-automation/`                       | `state.json` and the run lock                                 |
 | `/var/log/garbage-collection-automation/`                       | Job output, rotated weekly                                    |
 
-
-`/etc/garbage-collection-automation/` and both files in it belong to `root`, and
-only `root` may create or remove anything there — so an editor run as root meets
-an ordinary root-owned file, and the service user cannot put anything next to the
-file holding the tokens. The one concession the web interface asks for is that
-`config.toml` is group-writable by the service user (mode `0660`, group `gca`),
-which is what its *Save configuration* button needs; `--no-web` installs it `0640`
-and nothing but root writes it. The installer checks at the end that root really
-can write both files, and says so with the kernel's own words when it cannot.
 
 ## Configuration
 
@@ -290,10 +226,6 @@ The installer writes that file with both keys commented out and never touches it
 again on upgrade. From a checkout the same file is `config/env` (gitignored);
 `ENV_FILE` overrides the path in either layout.
 
-The API key is a fixed key the public afvalwijzer clients all send — not
-per-user, but not ours to hardcode either. A run without one stops with exit
-code 4.
-
 ## Usage
 
 The job runs on its own from cron. To run it by hand, use the command the
@@ -310,18 +242,13 @@ cat /var/lib/garbage-collection-automation/state.json   # private address/task m
 rm  /var/lib/garbage-collection-automation/state.json   # forget it; next run re-checks Todoist
 ```
 
-To change the schedule, edit `/etc/cron.d/garbage-collection-automation`. The
-change is live within a minute - cron re-reads that directory on every tick, so
-there is nothing to restart, and restarting cron by hand next to a daemon the
-init system does not track is how you end up with `cron: can't lock /var/run/crond.pid`. Reinstalling rewrites that file from `scheduling/*.cron`,
-so persistent changes belong in the repository template.
+To change the schedule, edit `/etc/cron.d/garbage-collection-automation`.
 
 ### Web interface
 
 A single local page showing what the last run found, the delta it would apply,
 and the configuration the headless run reads — every key of it, in a form that
-writes it back, next to `config.toml` itself as it is on disk. It is off until
-asked for — in `config.toml`:
+writes it back, next to `config.toml` itself as it is on disk.
 
 ```toml
 [web]
@@ -334,37 +261,16 @@ systemctl restart garbage-collection-automation-web
 journalctl -u garbage-collection-automation-web -f    # the access log lives here
 ```
 
-The service is the copy that comes back after a reboot. To watch the page answer
-instead of reading the journal afterwards, serve it on your own terminal: the
-command below runs in the foreground until ctrl-c, as the `gca` user, against the
-same config file, `state.json` and `ui/` the service uses. Only one of the two can
-hold the port, so it stops and says so while the service is running, and anything
-you pass it is handed to the server.
-
-```sh
-systemctl stop garbage-collection-automation-web
-~/garbage-collection/run-web-interface.sh
-```
-
-With `[web] enabled = false` it prints that and exits straight away — the switch
-in `config.toml` is the same one either way.
-
-The server binds **the loopback interface only**, and the configuration accepts
-nothing else: the page has no login and shows both secrets. Reach it over an ssh
+The page has no login and shows both secrets. Reach it over an ssh
 tunnel, which authenticates the person the page cannot:
 
 ```sh
-ssh -N -L 8080:127.0.0.1:8080 root@<container>                       # direct
+ssh -N -L 8080:127.0.0.1:8080 root@<container>                        # direct
 ssh -N -J root@<proxmox-host> -L 8080:127.0.0.1:8080 root@<container> # via Proxmox
 ```
 
-Then open [http://127.0.0.1:8080/](http://127.0.0.1:8080/). `curl http://127.0.0.1:8080/healthz` is the
-quickest way to tell a broken tunnel from a stopped server.
+Then open [http://127.0.0.1:8080/](http://127.0.0.1:8080/).
 
-The local end of the tunnel is free to be another port when 8080 is taken —
-`-L 8081:127.0.0.1:8080`, then open `http://127.0.0.1:8081/`. `localhost` works
-in place of `127.0.0.1` as well; what the endpoints refuse is a name that merely
-resolves here.
 
 The buttons run the same pipeline the weekly job runs, and differ only in how
 far they are allowed to get:
@@ -378,53 +284,6 @@ far they are allowed to get:
 | *Save configuration*          | `POST /api/config`  | the form           | `config.toml`, rewritten in place |
 | *Switch off and stop*         | `POST /api/stop`    | the form           | `[web] enabled = false`, then ends the process |
 
-
-`GET /api/state` returns the configuration, the file it came from, the last run
-and the cron line without touching the network — it is what the page draws
-itself from.
-
-The three run actions take the same lock the cron job takes; a lock they cannot
-have is answered **409 immediately, never a wait**. The schedule is shown but
-never written — change it over ssh.
-
-#### The configuration on the page
-
-The form covers every key in the table under [Configuration](#configuration) —
-`[web]` and `[logging]` included — and saving asks first, listing what is about
-to change. The whole document is re-rendered on a save, so a comment you added
-by hand is not written back; the annotations in the file are the ones
-`configuration.render()` writes.
-
-`[web]` is the one section a save cannot make true of the server answering the
-request: the address and port were bound at startup, so those three take effect
-at the next `systemctl restart garbage-collection-automation-web`.
-
-Below the table the page shows `config.toml` as it actually is on disk, comments
-and hand edits and all, with both secrets replaced by `••••••••` and the last
-few characters — enough to tell one key from another, and safe to screenshot.
-The form's own two fields still hold the real values behind a reveal button;
-that is the one place either appears. A file too broken to parse is not shown at
-all, since nothing can then tell a secret in it from a setting.
-
-#### Switching it off
-
-*Switch off and stop* is the page putting itself away: it writes
-`[web] enabled = false` and then ends the process, in that order, so a write
-that is refused leaves the server up and able to say why. The exit is `0`, which
-is not a failure, so `Restart=on-failure` leaves it stopped; the key in the file
-is what keeps it stopped across a reboot, where the unit still starts, reads it
-and exits.
-
-Getting it back is an edit and a start on the machine itself:
-
-```sh
-sed -i '/^\[web\]/,/^\[/ s/^enabled = false/enabled = true/' \
-    /etc/garbage-collection-automation/config.toml
-systemctl start garbage-collection-automation-web
-```
-
-The job is untouched either way: cron still runs it, and nothing about the
-to-dos depends on the page being served.
 
 ### Exit codes
 
@@ -461,18 +320,6 @@ echo 'GCA_TODOIST_TOKEN=...' >> config/env  # only if you enable the export
 ./src/run-job.sh --dry-run                  # same wrapper cron runs
 ```
 
-`src/run-job.sh` picks its layout from where it sits. To skip it and call the
-CLI directly, pass `--state` yourself:
-
-```sh
-uv run garbage-collection-automation --config config/config.toml --state .local/state.json --dry-run
-uv run garbage-collection-automation-web --config config/config.toml   # needs [web] enabled = true
-```
-
-`./build.sh --list` shows the build targets (`lxc` today, `docker` planned).
-`config/config.toml`, `config/env` and `.local/` are gitignored and never end up
-in a bundle.
-
 ### Tests
 
 ```sh
@@ -483,86 +330,9 @@ uv run pytest --cov --cov-report=term-missing
 No test touches the network: captured mijnafvalwijzer.nl responses in
 `tests/fixtures/` are replayed through `httpx.MockTransport`, Todoist answers
 from a table of canned replies, and a fixture in `conftest.py` fails any test
-that tries to reach a host other than the loopback one the web tests serve. The suite also covers the shell — the wrapper's two layouts,
-the installer's file handling, and the contents of the bundle `./build.sh lxc`
+that tries to reach a host other than the loopback one the web tests serve.
+The suite also covers the shell — the wrapper's two layouts, the installer's file handling, and the contents of the bundle `./build.sh lxc`
 produces.
-
-### Pre-commit hooks
-
-What runs before a commit is written lives in
-[.pre-commit-config.yaml](.pre-commit-config.yaml), with the Python rules in the
-`[tool.ruff]` section of `pyproject.toml`. Install it once per checkout — the
-line above in the setup block — after which it is automatic:
-
-```sh
-uv run pre-commit install          # once; writes .git/hooks/pre-commit
-uv run pre-commit run --all-files  # everything now, without committing
-uv run pre-commit autoupdate       # move the pinned hook versions forward
-```
-
-Ten things are checked, roughly in the order they can save you time:
-
-
-| Check                                  | What it stops                                                                                                                                            |
-| -------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `ruff check --fix`                     | Undefined names, unused imports, import order, comprehensions written the long way, syntax older than the 3.14 this targets, and bandit's security rules |
-| `ruff format`                          | Arguments about layout. The width is 100 — what this repository already writes, rather than ruff's default 88                                            |
-| `uv-lock`                              | A `pyproject.toml` edit without the `uv.lock` to match; an install resolves against the lock, so the container would build something the tests never ran |
-| `shellcheck`                           | Unquoted variables and typo'd tests in a thousand lines of bash — one file of which is piped into a root shell over the network                          |
-| `detect-secrets`, `detect-private-key` | An API key, a Todoist token or a private key pasted into a config example, a test or a captured fixture                                                  |
-| `check-toml` / `-json` / `-yaml`       | A syntax error in config the application parses at startup, or in a fixture the tests replay: a failed run at 04:00 rather than a failed test            |
-| `check-added-large-files`              | Build output, a virtualenv, a coverage database — anything over 1.5 MB. `dist/` is gitignored, but `git add -f` is one keystroke away                    |
-| shebang / executable bit               | A script that cron, systemd or the installer invokes by path, committed without its executable bit — a job that silently never runs                      |
-| merge conflict / case conflict         | Markers left in a file, and names that collide only on someone else's filesystem                                                                         |
-| whitespace / EOF / line endings        | Trailing whitespace and missing final newlines, which turn a one-line diff into a page of them, and CRLF in files shipped to a Debian container          |
-
-
-The hooks only ever see **staged** files, so `config/config.toml` and
-`config/env` — the two gitignored files that hold the real secrets — are never
-scanned or rewritten. The ones that fix rather than report (both ruff hooks, the
-whitespace ones) stop the commit after editing, so you can read what changed and
-stage it; committing again then goes through.
-
-`detect-secrets` compares against [.secrets.baseline](.secrets.baseline), which
-holds the hashes of the placeholder tokens the tests use. It stops a commit for
-two different reasons, and they want different things from you.
-
-*The baseline file was updated* is bookkeeping. A placeholder moved lines, so the
-hook rewrote the baseline and stopped rather than commit a stale one. Read the
-diff — it should touch nothing but `line_number` and `generated_at` — then stage
-it and commit again:
-
-```sh
-git add .secrets.baseline
-```
-
-*Potential secrets about to be committed* is a decision, and here the baseline is
-left alone. If the finding is real, take it out of the file. If it is a fixture
-or an example, the inline pragma is the cheaper fix — it keeps the reason next to
-the line it excuses, and leaves the baseline untouched:
-
-```python
-TOKEN = "not-a-real-token"  # pragma: allowlist secret
-```
-
-Regenerating the baseline is the heavier option, and the obvious command is the
-wrong one. A bare `detect-secrets scan` walks only what git already tracks, so on
-a checkout whose files are still untracked it finds nothing and writes an empty
-baseline — after which every placeholder in the tests reads as a new secret.
-Naming files narrows it the same way: the results block is replaced, not merged.
-So scan everything, and repeat the exclusions, which live in the baseline and are
-therefore only as good as the last command that wrote it. Without them the
-gitignored files that hold the real secrets get hashed into a file you are about
-to commit:
-
-```sh
-uv run detect-secrets scan --all-files --baseline .secrets.baseline \
-  --exclude-files '^\.venv/' --exclude-files '^\.git/' --exclude-files '^dist/' \
-  --exclude-files '^\.local/' --exclude-files '^\.pytest_cache/' \
-  --exclude-files '^\.ruff_cache/' --exclude-files '^\.env$' \
-  --exclude-files '^config/config\.toml$' --exclude-files '^config/env$' \
-  --exclude-files '^uv\.lock$'   # then read the diff before staging it
-```
 
 ## Security
 
